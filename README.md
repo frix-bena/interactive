@@ -59,3 +59,32 @@ Click **GESTURES OFF** (or press `G`) and allow camera access, then:
 ## License
 
 MIT
+
+## Voice bot
+
+The application includes an integrated real-time voice chat bot powered by Anthropic's Claude (`claude-sonnet-4-6`).
+
+### Setup
+
+To use the voice assistant, you must supply your own Anthropic API key. Create a `.env.local` file in the project root:
+
+```bash
+cp .env.local.example .env.local
+```
+
+Then edit `.env.local` and add your valid Anthropic API key:
+
+```env
+ANTHROPIC_API_KEY=your-actual-api-key
+```
+
+> **Note:** You must supply your own Anthropic API key in `.env.local` for the voice assistant to generate responses.
+
+### How it works
+
+- **Speech Recognition:** Automatically listens via the browser's native Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`).
+- **AI Processing:** Spoken utterances are sent to `/api/chat`, which queries Anthropic's `claude-sonnet-4-6` model with running conversation history.
+- **Text-to-Speech:** The bot speaks replies aloud using browser `window.speechSynthesis`.
+- **Hands-Free Continuous Conversation:** Listening pauses automatically while the bot speaks (so it does not hear itself) and resumes once speech finishes.
+- **Autoplay Handling:** Attempts auto-start immediately upon mount; if the browser restricts microphone access without user interaction, a "Tap to start talking" prompt allows one-click activation.
+
