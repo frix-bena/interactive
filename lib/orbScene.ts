@@ -5,6 +5,8 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 
+export type AgentState = "idle" | "listening" | "thinking" | "speaking" | "unsupported";
+
 export interface OrbSceneApi {
   /** Rotate the camera around the orb by the given angles (radians). */
   rotateBy(deltaTheta: number, deltaPhi: number): void;
@@ -13,6 +15,7 @@ export interface OrbSceneApi {
   zoomIn(): void;
   zoomOut(): void;
   resetView(): void;
+  setAgentState(state: AgentState): void;
   dispose(): void;
 }
 
@@ -697,11 +700,23 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   let flickerTimer = 0;
   let rafId = 0;
   let disposed = false;
+  let currentAgentState: AgentState = "idle";
 
   function animate() {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+
+    // Agent state modulation
+    let agentSurge = 0;
+    if (currentAgentState === "speaking") {
+      agentSurge = 0.8 + Math.sin(t * 14) * 0.4;
+      innerCore.rotation.y -= 0.012;
+      icoWire.rotation.y += 0.02;
+    } else if (currentAgentState === "thinking") {
+      agentSurge = 0.4 + Math.sin(t * 8) * 0.2;
+      innerCore.rotation.y -= 0.009;
+    }
 
     // Outer shell rotation
     outerShell.rotation.y += 0.0015;
@@ -729,7 +744,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const wave3 = Math.pow(Math.max(0, Math.sin(t * 0.4)), 5); // rare big surge
     const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 + 2)), 8); // mega surge
     const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3); // periodic full transparency
-    const surge = wave3 * 1.5 + wave4 * 2.0;
+    const surge = wave3 * 1.5 + wave4 * 2.0 + agentSurge;
     const coreScale = 1 + surge + Math.sin(t * 5) * 0.05;
     coreSphere.scale.setScalar(coreScale);
     // Opacity: mostly very low (0-0.15), sometimes fully transparent, brief bright on surge
@@ -853,6 +868,9 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     zoomIn: () => zoomBy(0.65),
     zoomOut: () => zoomBy(1.55),
     resetView,
+    setAgentState: (state: AgentState) => {
+      currentAgentState = state;
+    },
     dispose,
   };
 }

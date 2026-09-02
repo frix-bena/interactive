@@ -1,12 +1,18 @@
+"use client";
+
+import { useState } from "react";
 import JarvisOrb from "@/components/JarvisOrb";
-import VoiceBot from "@/components/VoiceBot";
+import VoiceBot, { type AgentState } from "@/components/VoiceBot";
 
 export default function Home() {
+  const [agentState, setAgentState] = useState<AgentState>("listening");
+
   return (
-    <>
-      <JarvisOrb />
-      <VoiceBot />
-    </>
+    <main>
+      <JarvisOrb agentState={agentState} />
+      <VoiceBot onAgentStateChange={setAgentState} />
+    </main>
   );
 }
+
 

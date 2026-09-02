@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createOrbScene, type OrbSceneApi } from "@/lib/orbScene";
+import { createOrbScene, type OrbSceneApi, type AgentState } from "@/lib/orbScene";
 import { HandTracker, type TrackerStatus } from "@/lib/handTracker";
 
 type CameraState = "off" | "starting" | "on" | "error";
@@ -12,7 +12,11 @@ const MODE_LABEL: Record<TrackerStatus["mode"], string> = {
   zoom: "ZOOM",
 };
 
-export default function JarvisOrb() {
+interface JarvisOrbProps {
+  agentState?: AgentState;
+}
+
+export default function JarvisOrb({ agentState = "idle" }: JarvisOrbProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -35,6 +39,12 @@ export default function JarvisOrb() {
       sceneRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (sceneRef.current) {
+      sceneRef.current.setAgentState(agentState);
+    }
+  }, [agentState]);
 
   const stopGestures = useCallback(() => {
     trackerRef.current?.stop();

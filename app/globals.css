@@ -233,3 +233,36 @@ body {
     display: none;
   }
 }
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 12px rgba(255, 170, 48, 0.4);
+  }
+  50% {
+    opacity: 0.75;
+    transform: scale(0.98);
+    box-shadow: 0 0 20px rgba(255, 204, 102, 0.8);
+  }
+}
+
+/* Custom HUD Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 5, 0, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 170, 48, 0.4);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 170, 48, 0.8);
+}
+

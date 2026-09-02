@@ -60,31 +60,41 @@ Click **GESTURES OFF** (or press `G`) and allow camera access, then:
 
 MIT
 
-## Voice bot
+## Voice & Text AI Assistant
 
-The application includes an integrated real-time voice chat bot powered by Anthropic's Claude (`claude-sonnet-4-6`).
+The application includes an integrated real-time holographic AI assistant powered by Anthropic Claude, OpenAI / Groq, Google Gemini, or a built-in offline engine.
 
-### Setup
+### Setup (Optional)
 
-To use the voice assistant, you must supply your own Anthropic API key. Create a `.env.local` file in the project root:
+You can run the assistant right away without any keys using the built-in offline engine. To enable cloud LLMs, create a `.env.local` file in the project root:
 
 ```bash
 cp .env.local.example .env.local
 ```
 
-Then edit `.env.local` and add your valid Anthropic API key:
+Then edit `.env.local` with your preferred provider:
 
 ```env
-ANTHROPIC_API_KEY=your-actual-api-key
+# Anthropic Claude
+ANTHROPIC_API_KEY=your-anthropic-api-key
+ANTHROPIC_MODEL=claude-3-5-haiku-20241022
+
+# Or OpenAI / Groq
+# OPENAI_API_KEY=your-openai-or-groq-key
+# OPENAI_MODEL=gpt-4o-mini
+
+# Or Google Gemini
+# GEMINI_API_KEY=your-gemini-key
 ```
 
-> **Note:** You must supply your own Anthropic API key in `.env.local` for the voice assistant to generate responses.
+### Features
 
-### How it works
+- **Voice & Text Directives:** Speak naturally via Web Speech API or type directly into the holographic HUD command bar at the bottom of the screen.
+- **Live Subtitles & Dialogue:** Real-time HUD banner displays transcripts of what you said and ULTRON's response with glowing telemetry.
+- **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity, audible neural speech. Powered by a dedicated server-side neural speech pipeline with seamless cross-platform browser audio unlocking and client-side fallback.
+- **Audio-Reactive 3D Orb:** The holographic core surges, spins, and blooms in sync with the assistant's speech and thinking states.
+- **Audio & Mic Toggles & Test Button:** Independent `🎙️ MIC`, `🔊 TTS`, and `🔊 TEST VOICE` controls allow immediate voice testing and seamless switching between voice and silent typing modes.
+- **Telemetry History Log:** View recent conversation exchanges directly from the HUD.
+- **Multi-Provider & Offline Fallback:** Seamlessly routes between Claude, GPT, Gemini, or ULTRON's built-in offline response engine if no keys are provided or network errors occur.
 
-- **Speech Recognition:** Automatically listens via the browser's native Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`).
-- **AI Processing:** Spoken utterances are sent to `/api/chat`, which queries Anthropic's `claude-sonnet-4-6` model with running conversation history.
-- **Text-to-Speech:** The bot speaks replies aloud using browser `window.speechSynthesis`.
-- **Hands-Free Continuous Conversation:** Listening pauses automatically while the bot speaks (so it does not hear itself) and resumes once speech finishes.
-- **Autoplay Handling:** Attempts auto-start immediately upon mount; if the browser restricts microphone access without user interaction, a "Tap to start talking" prompt allows one-click activation.
 
