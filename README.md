@@ -91,9 +91,11 @@ ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 
 - **Voice & Text Directives:** Speak naturally via Web Speech API or type directly into the holographic HUD command bar at the bottom of the screen.
 - **Live Subtitles & Dialogue:** Real-time HUD banner displays transcripts of what you said and ULTRON's response with glowing telemetry.
-- **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity, audible neural speech. Powered by a dedicated server-side neural speech pipeline with seamless cross-platform browser audio unlocking and client-side fallback.
+- **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity, audible neural speech. Powered by a dedicated Web Audio API buffer decoding pipeline that permanently unlocks browser audio and prevents autoplay blocking.
+- **Voice Persona Selector:** Choose between **JARVIS** (British articulate tech AI), **ULTRON** (Deep resonant cyborg harmonics), **FRIDAY** (Clear natural AI assistant), or **NATIVE** (Device browser synthesis).
+- **Live Voice Equalizer & Subtitles:** Real-time HUD banner displays transcripts accompanied by an animated holographic voice frequency visualizer while speaking.
+- **Audio & Mic Toggles & Test Button:** Independent `🎙️ MIC`, `🔊 TTS`, `🔊 TEST VOICE`, and Voice Persona controls allow immediate voice testing and seamless switching between voice and silent typing modes.
 - **Audio-Reactive 3D Orb:** The holographic core surges, spins, and blooms in sync with the assistant's speech and thinking states.
-- **Audio & Mic Toggles & Test Button:** Independent `🎙️ MIC`, `🔊 TTS`, and `🔊 TEST VOICE` controls allow immediate voice testing and seamless switching between voice and silent typing modes.
 - **Telemetry History Log:** View recent conversation exchanges directly from the HUD.
 - **Multi-Provider & Offline Fallback:** Seamlessly routes between Claude, GPT, Gemini, or ULTRON's built-in offline response engine if no keys are provided or network errors occur.
 

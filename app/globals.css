@@ -266,3 +266,41 @@ body {
   background: rgba(255, 170, 48, 0.8);
 }
 
+/* Voice Equalizer Visualizer */
+.voice-equalizer {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  vertical-align: middle;
+}
+
+.voice-eq-bar {
+  display: inline-block;
+  width: 3px;
+  min-height: 4px;
+  background-color: #ffaa30;
+  border-radius: 1px;
+  box-shadow: 0 0 6px rgba(255, 170, 48, 0.8);
+  animation: voice-eq-pulse 0.65s ease-in-out infinite alternate;
+  transform-origin: bottom;
+}
+
+.voice-eq-bar:nth-child(1) { height: 6px; animation-delay: 0.1s; animation-duration: 0.5s; }
+.voice-eq-bar:nth-child(2) { height: 14px; animation-delay: 0.25s; animation-duration: 0.7s; }
+.voice-eq-bar:nth-child(3) { height: 18px; animation-delay: 0.05s; animation-duration: 0.6s; }
+.voice-eq-bar:nth-child(4) { height: 10px; animation-delay: 0.3s; animation-duration: 0.8s; }
+.voice-eq-bar:nth-child(5) { height: 15px; animation-delay: 0.15s; animation-duration: 0.55s; }
+
+@keyframes voice-eq-pulse {
+  0% {
+    transform: scaleY(0.25);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scaleY(1.4);
+    opacity: 1;
+    background-color: #ffcc66;
+  }
+}
+

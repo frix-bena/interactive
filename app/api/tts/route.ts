@@ -2,12 +2,15 @@ import { NextResponse } from "next/server";
 
 // In-memory audio cache for frequent phrases
 const audioCache = new Map<string, Buffer>();
-const MAX_CACHE_SIZE = 100;
+const MAX_CACHE_SIZE = 120;
 
 function sanitizeForSpeech(text: string): string {
   return text
-    .replace(/<[^>]*>/g, "")
+    .replace(/https?:\/\/\S+/gi, "") // strip URLs
+    .replace(/<[^>]*>/g, "") // strip HTML tags
+    .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "") // strip emojis
     .replace(/[*_~`#\[\]\(\)\{\}\>\<\+\=\|\\]/g, " ")
+    .replace(/^\s*[\d\-\*\•]+\.?\s+/gm, " ") // strip bullet numbers/dashes
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -31,7 +34,6 @@ function splitIntoChunks(text: string, maxLength = 135): string[] {
       if (trimmed.length <= maxLength) {
         current = trimmed;
       } else {
-        // Break long sentence by comma or words
         const words = trimmed.split(" ");
         current = "";
         for (const word of words) {
@@ -50,14 +52,14 @@ function splitIntoChunks(text: string, maxLength = 135): string[] {
   return chunks.filter((c) => c.trim().length > 0);
 }
 
-async function fetchGoogleTTS(chunk: string): Promise<Buffer> {
+async function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 6500);
 
   try {
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
       chunk
-    )}&tl=en&client=tw-ob`;
+    )}&tl=${encodeURIComponent(lang)}&client=tw-ob`;
     const res = await fetch(url, {
       headers: {
         "User-Agent":
@@ -78,8 +80,8 @@ async function fetchGoogleTTS(chunk: string): Promise<Buffer> {
   }
 }
 
-async function generateOpenAITTS(apiKey: string, text: string): Promise<Buffer | null> {
-  const voice = process.env.OPENAI_TTS_VOICE || "onyx";
+async function generateOpenAITTS(apiKey: string, text: string, voiceName?: string): Promise<Buffer | null> {
+  const voice = voiceName || process.env.OPENAI_TTS_VOICE || "onyx";
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -114,55 +116,76 @@ async function generateOpenAITTS(apiKey: string, text: string): Promise<Buffer |
   }
 }
 
-async function generateAudio(text: string): Promise<{ buffer: Buffer; engine: string }> {
+async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ buffer: Buffer; engine: string }> {
   const clean = sanitizeForSpeech(text).slice(0, 1000);
   if (!clean) {
     throw new Error("Text is empty after sanitization.");
   }
 
+  const vKey = (voiceOption || "jarvis").toLowerCase().trim();
+  const cacheKey = `${vKey}:${clean}`;
+
   // Check cache
-  const cached = audioCache.get(clean);
+  const cached = audioCache.get(cacheKey);
   if (cached) {
     return { buffer: cached, engine: "cache" };
   }
 
   // 1. Try OpenAI TTS if configured
   if (process.env.OPENAI_API_KEY) {
-    const openAiBuffer = await generateOpenAITTS(process.env.OPENAI_API_KEY, clean);
+    let openAiVoice = "onyx";
+    if (vKey === "friday") openAiVoice = "nova";
+    else if (vKey === "jarvis") openAiVoice = "echo";
+    else if (vKey === "titan") openAiVoice = "fable";
+    else if (["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(vKey)) {
+      openAiVoice = vKey;
+    }
+
+    const openAiBuffer = await generateOpenAITTS(process.env.OPENAI_API_KEY, clean, openAiVoice);
     if (openAiBuffer) {
       if (audioCache.size >= MAX_CACHE_SIZE) {
         const firstKey = audioCache.keys().next().value;
         if (firstKey) audioCache.delete(firstKey);
       }
-      audioCache.set(clean, openAiBuffer);
-      return { buffer: openAiBuffer, engine: "openai" };
+      audioCache.set(cacheKey, openAiBuffer);
+      return { buffer: openAiBuffer, engine: `openai-${openAiVoice}` };
     }
   }
 
-  // 2. High-quality neural Google TTS engine (zero configuration required)
+  // 2. High-quality neural Google TTS engine with regional persona support
+  let googleLang = "en-gb";
+  if (vKey === "friday" || vKey === "en-us" || vKey === "us") {
+    googleLang = "en-us";
+  } else if (vKey === "australian" || vKey === "en-au" || vKey === "au") {
+    googleLang = "en-au";
+  } else if (vKey === "jarvis" || vKey === "ultron" || vKey === "en-gb" || vKey === "uk") {
+    googleLang = "en-gb";
+  }
+
   const chunks = splitIntoChunks(clean);
-  const chunkBuffers = await Promise.all(chunks.map((chunk) => fetchGoogleTTS(chunk)));
+  const chunkBuffers = await Promise.all(chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang)));
   const combined = Buffer.concat(chunkBuffers);
 
   if (audioCache.size >= MAX_CACHE_SIZE) {
     const firstKey = audioCache.keys().next().value;
     if (firstKey) audioCache.delete(firstKey);
   }
-  audioCache.set(clean, combined);
+  audioCache.set(cacheKey, combined);
 
-  return { buffer: combined, engine: "google-tts" };
+  return { buffer: combined, engine: `google-${googleLang}` };
 }
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const text = searchParams.get("text") || "";
+    const voice = searchParams.get("voice") || "jarvis";
 
     if (!text.trim()) {
       return NextResponse.json({ error: "Query parameter 'text' is required" }, { status: 400 });
     }
 
-    const { buffer, engine } = await generateAudio(text);
+    const { buffer, engine } = await generateAudio(text, voice);
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
@@ -183,12 +206,13 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const text = typeof body?.text === "string" ? body.text : "";
+    const voice = typeof body?.voice === "string" ? body.voice : "jarvis";
 
     if (!text.trim()) {
       return NextResponse.json({ error: "Body property 'text' is required" }, { status: 400 });
     }
 
-    const { buffer, engine } = await generateAudio(text);
+    const { buffer, engine } = await generateAudio(text, voice);
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
