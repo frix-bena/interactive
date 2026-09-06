@@ -103,6 +103,7 @@ interface VoiceBotProps {
 export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [status, setStatus] = useState<AgentState>("listening");
   const [needsGesture, setNeedsGesture] = useState<boolean>(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState<string>("");
   const [isMicEnabled, setIsMicEnabled] = useState<boolean>(true);
@@ -117,18 +118,23 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isMountedRef = useRef<boolean>(true);
   const isSpeakingRef = useRef<boolean>(false);
   const isThinkingRef = useRef<boolean>(false);
+  const isUserSpeakingRef = useRef<boolean>(false);
   const isMicEnabledRef = useRef<boolean>(true);
   const isVoiceMutedRef = useRef<boolean>(false);
   const selectedVoiceRef = useRef<VoicePersona>("jarvis");
   const needsGestureRef = useRef<boolean>(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const accumulatedFinalTranscriptRef = useRef<string>("");
+  const latestInterimTranscriptRef = useRef<string>("");
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingAudioRef = useRef<{ text: string; persona: VoicePersona } | null>(null);
 
   messagesRef.current = messages;
   isMicEnabledRef.current = isMicEnabled;
@@ -142,6 +148,34 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     },
     [onAgentStateChange]
   );
+
+  /**
+   * Stop any active audio playback node, HTML5 audio element, or speech synthesis utterance.
+   */
+  const stopAllPlayback = useCallback(() => {
+    if (currentSourceNodeRef.current) {
+      try {
+        currentSourceNodeRef.current.stop();
+        currentSourceNodeRef.current.disconnect();
+      } catch {}
+      currentSourceNodeRef.current = null;
+    }
+    if (audioElementRef.current) {
+      try {
+        audioElementRef.current.pause();
+        audioElementRef.current.currentTime = 0;
+      } catch {}
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
+    if (ttsSafetyTimeoutRef.current) {
+      clearTimeout(ttsSafetyTimeoutRef.current);
+      ttsSafetyTimeoutRef.current = null;
+    }
+  }, []);
 
   /**
    * Unlock Web Audio & browser audio elements on user interaction.
@@ -180,12 +214,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       } catch {}
     }
 
-    // Prepare persistent HTML5 Audio element
-    if (!audioElementRef.current) {
-      try {
+    // Prepare and unlock HTML5 Audio element
+    try {
+      if (!audioElementRef.current) {
         audioElementRef.current = new Audio();
-      } catch {}
-    }
+      }
+      const silentAudio = audioElementRef.current;
+      silentAudio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+      void silentAudio.play().catch(() => {});
+    } catch {}
 
     // Prepare SpeechSynthesis
     if ("speechSynthesis" in window) {
@@ -194,6 +231,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       } catch {}
     }
 
+    setNeedsGesture(false);
+    needsGestureRef.current = false;
     setAudioBlockedNotice(false);
     return ctx;
   }, []);
@@ -256,78 +295,107 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   /**
    * Client-side Web Speech API fallback with persona-tailored voice selection
    */
-  const fallbackSpeechSynthesis = useCallback((text: string, persona: VoicePersona, onFinish: () => void) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      onFinish();
-      return;
-    }
-
-    try {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.resume();
-    } catch {}
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.volume = 1.0;
-
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) {
-      let preferredVoice: SpeechSynthesisVoice | undefined;
-
-      if (persona === "jarvis") {
-        // British articulate AI
-        preferredVoice =
-          voices.find(
-            (v) =>
-              (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
-              /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
-          ) ||
-          voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB"));
-        utterance.rate = 1.0;
-        utterance.pitch = 0.98;
-      } else if (persona === "ultron") {
-        // Deep cyborg
-        preferredVoice =
-          voices.find(
-            (v) =>
-              v.lang.startsWith("en") &&
-              /David|Guy|Mark|Google UK English Male|Google US English/i.test(v.name)
-          ) || voices.find((v) => v.lang.startsWith("en"));
-        utterance.rate = 0.93;
-        utterance.pitch = 0.82;
-      } else if (persona === "friday") {
-        // Natural female AI
-        preferredVoice =
-          voices.find(
-            (v) =>
-              v.lang.startsWith("en") &&
-              /Samantha|Victoria|Zira|Jenny|Google US English|Natural/i.test(v.name)
-          ) || voices.find((v) => v.lang.startsWith("en"));
-        utterance.rate = 1.03;
-        utterance.pitch = 1.06;
-      } else {
-        preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
-        utterance.rate = 1.0;
-        utterance.pitch = 1.0;
+  const fallbackSpeechSynthesis = useCallback(
+    (text: string, persona: VoicePersona, onFinish: () => void) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        onFinish();
+        return;
       }
 
-      if (preferredVoice) {
-        utterance.voice = preferredVoice;
-      }
-    }
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+      } catch {}
 
-    utterance.onend = () => {
-      onFinish();
-    };
+      // Short delay to avoid Chrome asynchronous cancel dropping the new utterance
+      setTimeout(() => {
+        if (!isMountedRef.current || !isSpeakingRef.current) {
+          onFinish();
+          return;
+        }
 
-    utterance.onerror = (e) => {
-      console.warn("Browser speech synthesis error:", e);
-      onFinish();
-    };
+        try {
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.volume = 1.0;
 
-    activeUtteranceRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
-  }, []);
+          const voices = window.speechSynthesis.getVoices();
+          if (voices.length > 0) {
+            let preferredVoice: SpeechSynthesisVoice | undefined;
+
+            if (persona === "jarvis") {
+              // British articulate AI
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
+                    /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
+                ) ||
+                voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB"));
+              utterance.rate = 1.0;
+              utterance.pitch = 0.98;
+            } else if (persona === "ultron") {
+              // Deep cyborg
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    v.lang.startsWith("en") &&
+                    /David|Guy|Mark|Google UK English Male|Google US English/i.test(v.name)
+                ) || voices.find((v) => v.lang.startsWith("en"));
+              utterance.rate = 0.93;
+              utterance.pitch = 0.82;
+            } else if (persona === "friday") {
+              // Natural female AI
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    v.lang.startsWith("en") &&
+                    /Samantha|Victoria|Zira|Jenny|Google US English|Natural/i.test(v.name)
+                ) || voices.find((v) => v.lang.startsWith("en"));
+              utterance.rate = 1.03;
+              utterance.pitch = 1.06;
+            } else {
+              preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
+              utterance.rate = 1.0;
+              utterance.pitch = 1.0;
+            }
+
+            if (preferredVoice) {
+              utterance.voice = preferredVoice;
+            }
+          }
+
+          utterance.onend = () => {
+            onFinish();
+          };
+
+          utterance.onerror = (e) => {
+            console.warn("Browser speech synthesis error:", e);
+            onFinish();
+          };
+
+          activeUtteranceRef.current = utterance;
+          window.speechSynthesis.speak(utterance);
+
+          // Workaround for Chrome speech synthesis pausing on longer utterances
+          const resumeInterval = setInterval(() => {
+            if (typeof window !== "undefined" && "speechSynthesis" in window) {
+              if (window.speechSynthesis.speaking) {
+                window.speechSynthesis.resume();
+              } else {
+                clearInterval(resumeInterval);
+              }
+            } else {
+              clearInterval(resumeInterval);
+            }
+          }, 2500);
+        } catch (e) {
+          console.warn("Speech synthesis invocation failed:", e);
+          onFinish();
+        }
+      }, 50);
+    },
+    []
+  );
 
   /**
    * Main speech playback engine:
@@ -357,28 +425,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
 
       // Stop any existing speech / audio playback
-      if (currentSourceNodeRef.current) {
-        try {
-          currentSourceNodeRef.current.stop();
-          currentSourceNodeRef.current.disconnect();
-        } catch {}
-        currentSourceNodeRef.current = null;
-      }
-      if (audioElementRef.current) {
-        try {
-          audioElementRef.current.pause();
-          audioElementRef.current.currentTime = 0;
-        } catch {}
-      }
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        try {
-          window.speechSynthesis.cancel();
-        } catch {}
-      }
-      if (ttsSafetyTimeoutRef.current) {
-        clearTimeout(ttsSafetyTimeoutRef.current);
-        ttsSafetyTimeoutRef.current = null;
-      }
+      stopAllPlayback();
 
       // Pause microphone listening so Ultron doesn't listen to his own speech
       stopListening();
@@ -403,18 +450,18 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         isSpeakingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
 
-        // Delay resuming listening by 300ms to avoid audio reverb picking up
+        // Delay resuming listening by 350ms to avoid audio reverb picking up
         if (isMicEnabledRef.current) {
           setTimeout(() => {
             if (isMountedRef.current && !isSpeakingRef.current && isMicEnabledRef.current) {
               startListening();
             }
-          }, 300);
+          }, 350);
         }
       };
 
       // Safety timer in case playback events are dropped
-      const estimatedDurationMs = Math.max(5000, (cleanText.length / 9) * 1000 + 4000);
+      const estimatedDurationMs = Math.max(6000, (cleanText.length / 9) * 1000 + 4500);
       ttsSafetyTimeoutRef.current = setTimeout(() => {
         if (isSpeakingRef.current) {
           console.warn("Voice playback safety timeout reached, restoring state");
@@ -428,7 +475,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      // 1. Primary: Server-Side TTS with Web Audio decoding (unrestricted autoplay)
+      // 1. Primary: Server-Side TTS with Web Audio decoding (unrestricted autoplay once running)
       try {
         const response = await fetch("/api/tts", {
           method: "POST",
@@ -446,14 +493,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const arrayBuffer = await response.arrayBuffer();
         if (!isMountedRef.current || !isSpeakingRef.current) return;
 
-        // Try playing via Web Audio API (completely immune to async play() restrictions once unlocked)
-        if (ctx && ctx.state !== "closed") {
+        // Try playing via Web Audio API ONLY IF the context is actively running
+        if (ctx && ctx.state === "running") {
           try {
-            if (ctx.state === "suspended") {
-              await ctx.resume();
-            }
-
-            const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+            // Clone arrayBuffer before decodeAudioData so original buffer is not neutered if fallback is needed
+            const bufferCopy = arrayBuffer.slice(0);
+            const audioBuffer = await ctx.decodeAudioData(bufferCopy);
             if (!isMountedRef.current || !isSpeakingRef.current) return;
 
             const source = ctx.createBufferSource();
@@ -502,6 +547,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
           const audioUrl = URL.createObjectURL(blob);
           const audio = audioElementRef.current || new Audio();
+          audioElementRef.current = audio;
           audio.src = audioUrl;
           audio.volume = 1.0;
 
@@ -519,18 +565,18 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           setAudioBlockedNotice(false);
           return;
         } catch (playErr) {
-          if (playErr instanceof DOMException && playErr.name === "NotAllowedError") {
-            console.warn("Audio element play restricted by browser policy; showing unlock banner");
-            setAudioBlockedNotice(true);
-          }
-          throw playErr;
+          console.warn("HTML5 audio element playback restricted by browser policy:", playErr);
+          pendingAudioRef.current = { text: cleanText, persona: currentPersona };
+          setAudioBlockedNotice(true);
+          fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
+          return;
         }
       } catch (err) {
         console.warn("Network TTS failed, falling back to Web Speech Synthesis:", err);
         fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
       }
     },
-    [fallbackSpeechSynthesis, playJarvisChirp, startListening, stopListening, unlockAudioSystems, updateStatus]
+    [fallbackSpeechSynthesis, playJarvisChirp, startListening, stopAllPlayback, stopListening, unlockAudioSystems, updateStatus]
   );
 
   const processUtterance = useCallback(
@@ -615,6 +661,34 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     },
     [speakReply, stopListening, updateStatus]
   );
+
+  /**
+   * Called once the user has finished talking (silence detected or speech finalized).
+   * Commits the accumulated user transcript and triggers agent thinking and voice response.
+   */
+  const commitUserSpeech = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    const speech = (
+      accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
+    ).trim();
+
+    accumulatedFinalTranscriptRef.current = "";
+    latestInterimTranscriptRef.current = "";
+    setIsUserSpeaking(false);
+    isUserSpeakingRef.current = false;
+
+    if (!speech || isSpeakingRef.current || isThinkingRef.current) {
+      return;
+    }
+
+    // Stop listening while thinking and speaking so Ultron doesn't listen to his own speech
+    stopListening();
+    void processUtterance(speech);
+  }, [processUtterance, stopListening]);
 
   /**
    * Activated when user clicks the "ACTIVATE VOICE INTERFACE" button
@@ -721,6 +795,22 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     void speakReply(testPhrase);
   }, [selectedVoice, speakReply, unlockAudioSystems, updateStatus]);
 
+  /**
+   * Play any pending agent speech response that was blocked by browser autoplay policy
+   */
+  const handlePlayPendingAudio = useCallback(async () => {
+    await unlockAudioSystems();
+    setAudioBlockedNotice(false);
+
+    if (pendingAudioRef.current?.text) {
+      const { text, persona } = pendingAudioRef.current;
+      pendingAudioRef.current = null;
+      void speakReply(text, persona);
+    } else {
+      void handleTestVoice();
+    }
+  }, [handleTestVoice, speakReply, unlockAudioSystems]);
+
   const handleSelectVoice = useCallback((personaId: VoicePersona) => {
     setSelectedVoice(personaId);
     selectedVoiceRef.current = personaId;
@@ -770,6 +860,21 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (typeof window === "undefined") return;
 
+    // Detect if browser requires user gesture for audio context
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (AudioCtx) {
+      try {
+        const probeCtx = new AudioCtx();
+        if (probeCtx.state === "suspended") {
+          setNeedsGesture(true);
+          needsGestureRef.current = true;
+        }
+        void probeCtx.close().catch(() => {});
+      } catch {}
+    }
+
     const SpeechRecConstructor =
       (window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition;
@@ -780,8 +885,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     }
 
     const recognition = new SpeechRecConstructor();
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.lang = "en-US";
     recognitionRef.current = recognition;
 
@@ -792,22 +897,63 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     };
 
     recognition.onresult = (event: SpeechRecognitionEventItem) => {
-      let finalTranscript = "";
+      if (!isMountedRef.current || isSpeakingRef.current || isThinkingRef.current) {
+        return;
+      }
+
+      let currentInterim = "";
+      let newlyFinalized = "";
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result && result[0]) {
-          finalTranscript += result[0].transcript;
+        const item = event.results[i];
+        if (item && item[0]) {
+          if (item.isFinal) {
+            newlyFinalized += item[0].transcript + " ";
+          } else {
+            currentInterim += item[0].transcript;
+          }
         }
       }
 
-      const trimmed = finalTranscript.trim();
-      if (trimmed) {
-        void processUtterance(trimmed);
+      if (newlyFinalized) {
+        accumulatedFinalTranscriptRef.current += newlyFinalized;
+      }
+      latestInterimTranscriptRef.current = currentInterim;
+
+      const fullTranscript = (
+        accumulatedFinalTranscriptRef.current + " " + currentInterim
+      ).trim();
+
+      if (fullTranscript) {
+        setIsUserSpeaking(true);
+        isUserSpeakingRef.current = true;
+
+        // Show live user speech in subtitles as they speak
+        setDialogue((prev) => ({
+          user: fullTranscript,
+          agent: prev?.agent,
+          provider: prev?.provider,
+        }));
+
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+        }
+
+        // Voice activity silence window:
+        // Once user pauses after talking (800ms for finalized or 1200ms for interim),
+        // trigger agent response!
+        const silenceDelayMs = newlyFinalized.length > 0 ? 800 : 1200;
+        silenceTimerRef.current = setTimeout(() => {
+          commitUserSpeech();
+        }, silenceDelayMs);
       }
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEventItem) => {
       if (!isMountedRef.current) return;
+      if (event.error === "no-speech") {
+        return;
+      }
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         setNeedsGesture(true);
         needsGestureRef.current = true;
@@ -816,6 +962,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     recognition.onend = () => {
       if (!isMountedRef.current) return;
+
+      // If user had spoken and recognizer ended, process speech immediately
+      const pendingSpeech = (
+        accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
+      ).trim();
+
+      if (pendingSpeech && !isSpeakingRef.current && !isThinkingRef.current) {
+        commitUserSpeech();
+        return;
+      }
 
       // Auto-restart listening if mic is enabled and not speaking/thinking
       if (
@@ -837,7 +993,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           ) {
             startListening();
           }
-        }, 300);
+        }, 250);
       }
     };
 
@@ -854,6 +1010,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     return () => {
       isMountedRef.current = false;
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
       if (restartTimeoutRef.current) {
         clearTimeout(restartTimeoutRef.current);
       }
@@ -869,13 +1028,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         } catch {}
         recognitionRef.current = null;
       }
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        try {
-          window.speechSynthesis.cancel();
-        } catch {}
-      }
+      stopAllPlayback();
     };
-  }, [processUtterance, startListening, updateStatus]);
+  }, [commitUserSpeech, startListening, stopAllPlayback, updateStatus]);
 
   const activePersona = VOICE_PERSONAS[selectedVoice];
 
@@ -899,8 +1054,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           <button
             type="button"
             onClick={() => {
-              void unlockAudioSystems();
-              void handleTestVoice();
+              void handlePlayPendingAudio();
             }}
             className="hud-btn"
             style={{
@@ -1143,6 +1297,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                       ? "#ffcc66"
                       : status === "thinking"
                       ? "#ff8800"
+                      : isUserSpeaking
+                      ? "#ffdd44"
                       : isMicEnabled
                       ? "#ffaa30"
                       : "#885500",
@@ -1151,6 +1307,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                       ? "0 0 10px #ffcc66"
                       : status === "thinking"
                       ? "0 0 10px #ff8800"
+                      : isUserSpeaking
+                      ? "0 0 12px #ffdd44"
                       : isMicEnabled
                       ? "0 0 6px #ffaa30"
                       : "none",
@@ -1159,7 +1317,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               <span>
                 {status === "speaking" && "TRANSMITTING"}
                 {status === "thinking" && "PROCESSING"}
-                {status === "listening" && isMicEnabled && "LISTENING"}
+                {status === "listening" && (isUserSpeaking ? "HEARING..." : (isMicEnabled ? "LISTENING" : "STANDBY"))}
                 {status === "idle" && (!isMicEnabled ? "STANDBY" : "READY")}
                 {status === "unsupported" && "TEXT ONLY"}
               </span>
@@ -1196,9 +1354,33 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             }}
           >
             {dialogue.user && (
-              <div style={{ fontSize: "12px", color: "rgba(255, 200, 100, 0.75)", letterSpacing: "0.05em" }}>
-                <span style={{ color: "#ff8800", fontWeight: "bold", marginRight: "6px" }}>&gt; USER:</span>
-                &ldquo;{dialogue.user}&rdquo;
+              <div
+                style={{
+                  fontSize: "12px",
+                  color: "rgba(255, 200, 100, 0.75)",
+                  letterSpacing: "0.05em",
+                  display: "flex",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: "6px",
+                }}
+              >
+                <span style={{ color: "#ff8800", fontWeight: "bold" }}>&gt; USER:</span>
+                <span>&ldquo;{dialogue.user}&rdquo;</span>
+                {isUserSpeaking && (
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      color: "#ffaa30",
+                      opacity: 0.85,
+                      fontStyle: "italic",
+                      letterSpacing: "0.08em",
+                      animation: "pulse 1s infinite ease-in-out",
+                    }}
+                  >
+                    (speaking...)
+                  </span>
+                )}
               </div>
             )}
             {dialogue.agent && (
@@ -1230,6 +1412,27 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                   </span>
                 )}
               </div>
+            )}
+            {audioBlockedNotice && (
+              <button
+                type="button"
+                onClick={() => {
+                  void handlePlayPendingAudio();
+                }}
+                className="hud-btn"
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "6px 14px",
+                  fontSize: "11px",
+                  color: "#ffdd66",
+                  borderColor: "#ffaa30",
+                  animation: "pulse 1.5s infinite ease-in-out",
+                  boxShadow: "0 0 12px rgba(255, 170, 48, 0.4)",
+                  marginTop: "4px",
+                }}
+              >
+                🔊 CLICK TO PLAY AGENT VOICE
+              </button>
             )}
             {dialogue.provider && (
               <div
