@@ -142,6 +142,10 @@ export default function JarvisOrb({ agentState = "idle" }: JarvisOrbProps) {
             <span className="key">+/−</span> zoom
           </div>
         )}
+        <div>
+          <span className="key">V</span> voice reply&nbsp;&nbsp;
+          <span className="key">ESC</span> stop speaking
+        </div>
       </div>
 
       <div className="hud hud-controls">

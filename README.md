@@ -44,6 +44,9 @@ Click **GESTURES OFF** (or press `G`) and allow camera access, then:
 | `G` | Toggle hand gestures |
 | `R` | Reset the view |
 | `+` / `−` | Zoom in / out |
+| `V` | Voice reply mode / Stop speaking & reply |
+| `ESC` | Stop assistant speech & reply by voice, or cancel speech |
+| `Space` | (outside text input) Stop speaking & reply, or stop assistant |
 
 ## How it works
 
@@ -90,6 +93,9 @@ ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 ### Features
 
 - **Voice & Text Directives:** Speak naturally via Web Speech API or type directly into the holographic HUD command bar at the bottom of the screen.
+- **Stop Speaking & Immediate Voice Reply:** Manually finalize user speech at any moment via the interactive `[⏹️ STOP SPEAKING & REPLY]` button or keyboard shortcuts (`V`, `Space`, `Enter`), immediately triggering an audible voice response from ULTRON without waiting for silence detection.
+- **Interrupt Assistant & Reply by Voice:** Instantly silence ULTRON during speech playback using `[⏹️ STOP ULTRON & REPLY BY VOICE]` or pressing `ESC` / `Space`, which immediately arms the microphone so you can reply using your voice.
+- **Dedicated Voice Reply HUD:** Direct `🎙️ REPLY USING VOICE` button right inside the bottom command bar to seamlessly transition between voice directives and text commands.
 - **Live Subtitles & Dialogue:** Real-time HUD banner displays transcripts of what you said and ULTRON's response with glowing telemetry.
 - **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity, audible neural speech. Powered by a dedicated Web Audio API buffer decoding pipeline that permanently unlocks browser audio and prevents autoplay blocking.
 - **Voice Persona Selector:** Choose between **JARVIS** (British articulate tech AI), **ULTRON** (Deep resonant cyborg harmonics), **FRIDAY** (Clear natural AI assistant), or **NATIVE** (Device browser synthesis).
