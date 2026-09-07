@@ -53,30 +53,41 @@ function splitIntoChunks(text: string, maxLength = 135): string[] {
 }
 
 async function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6500);
+  const doFetch = async (targetLang: string) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6500);
+
+    try {
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+        chunk
+      )}&tl=${encodeURIComponent(targetLang)}&client=tw-ob`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "audio/mpeg, audio/*;q=0.9, */*;q=0.5",
+        },
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        throw new Error(`Google TTS error status ${res.status}`);
+      }
+
+      const arrayBuf = await res.arrayBuffer();
+      return Buffer.from(arrayBuf);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
 
   try {
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
-      chunk
-    )}&tl=${encodeURIComponent(lang)}&client=tw-ob`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "audio/mpeg, audio/*;q=0.9, */*;q=0.5",
-      },
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      throw new Error(`Google TTS error status ${res.status}`);
+    return await doFetch(lang);
+  } catch (err) {
+    if (lang !== "en") {
+      return await doFetch("en");
     }
-
-    const arrayBuf = await res.arrayBuffer();
-    return Buffer.from(arrayBuf);
-  } finally {
-    clearTimeout(timeoutId);
+    throw err;
   }
 }
 

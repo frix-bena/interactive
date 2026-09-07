@@ -185,7 +185,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     if (typeof window === "undefined") return null;
 
     let ctx = audioContextRef.current;
-    if (!ctx) {
+    if (!ctx || ctx.state === "closed") {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -199,7 +199,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (ctx && ctx.state === "suspended") {
       try {
-        await ctx.resume();
+        // Race resume() against a tight timeout so that if called without
+        // transient user activation, it does NOT hang execution indefinitely!
+        await Promise.race([
+          ctx.resume(),
+          new Promise((resolve) => setTimeout(resolve, 80)),
+        ]);
       } catch {}
     }
 
@@ -212,28 +217,31 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         silentSrc.connect(ctx.destination);
         silentSrc.start(0);
       } catch {}
+      setNeedsGesture(false);
+      needsGestureRef.current = false;
+      setAudioBlockedNotice(false);
     }
 
-    // Prepare and unlock HTML5 Audio element
-    try {
-      if (!audioElementRef.current) {
-        audioElementRef.current = new Audio();
-      }
-      const silentAudio = audioElementRef.current;
-      silentAudio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
-      void silentAudio.play().catch(() => {});
-    } catch {}
-
-    // Prepare SpeechSynthesis
-    if ("speechSynthesis" in window) {
+    // Prepare HTML5 Audio element once without constantly replacing active src
+    if (!audioElementRef.current) {
       try {
-        window.speechSynthesis.resume();
+        const silentAudio = new Audio(
+          "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"
+        );
+        audioElementRef.current = silentAudio;
+        void silentAudio.play().catch(() => {});
       } catch {}
     }
 
-    setNeedsGesture(false);
-    needsGestureRef.current = false;
-    setAudioBlockedNotice(false);
+    // Prepare SpeechSynthesis
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+      } catch {}
+    }
+
     return ctx;
   }, []);
 
@@ -304,7 +312,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
       try {
         window.speechSynthesis.cancel();
-        window.speechSynthesis.resume();
       } catch {}
 
       // Short delay to avoid Chrome asynchronous cancel dropping the new utterance
@@ -315,6 +322,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
 
         try {
+          if (window.speechSynthesis.paused) {
+            window.speechSynthesis.resume();
+          }
+
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.volume = 1.0;
 
@@ -369,7 +380,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           };
 
           utterance.onerror = (e) => {
-            console.warn("Browser speech synthesis error:", e);
+            if (e.error !== "interrupted" && e.error !== "canceled") {
+              console.warn("Browser speech synthesis error:", e);
+            }
             onFinish();
           };
 
@@ -546,10 +559,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         try {
           const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
           const audioUrl = URL.createObjectURL(blob);
-          const audio = audioElementRef.current || new Audio();
-          audioElementRef.current = audio;
-          audio.src = audioUrl;
+          const audio = new Audio(audioUrl);
           audio.volume = 1.0;
+          audioElementRef.current = audio;
 
           audio.onended = () => {
             URL.revokeObjectURL(audioUrl);
@@ -834,6 +846,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     // Unlock audio context synchronously during form submission gesture
     void unlockAudioSystems();
+    setNeedsGesture(false);
+    needsGestureRef.current = false;
     void processUtterance(text);
   };
 
@@ -841,6 +855,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   useEffect(() => {
     const handleGesture = () => {
       void unlockAudioSystems();
+      setNeedsGesture(false);
+      needsGestureRef.current = false;
     };
 
     window.addEventListener("pointerdown", handleGesture, { passive: true });
@@ -1073,7 +1089,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         )}
 
         {/* Activation Prompt if Gesture Required */}
-        {needsGesture ? (
+        {needsGesture && (
           <button
             type="button"
             onClick={handleActivateVoice}
@@ -1091,8 +1107,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           >
             🎙️ ACTIVATE VOICE INTERFACE
           </button>
-        ) : (
-          <div style={{ display: "flex", gap: "8px", alignItems: "center", position: "relative" }}>
+        )}
+
+        <div style={{ display: "flex", gap: "8px", alignItems: "center", position: "relative" }}>
             {/* Voice Persona Selector */}
             <div style={{ position: "relative" }}>
               <button
@@ -1323,8 +1340,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               </span>
             </div>
           </div>
-        )}
-      </div>
+        </div>
 
       {/* Live Dialogue & Subtitles HUD Banner */}
       {dialogue && (
