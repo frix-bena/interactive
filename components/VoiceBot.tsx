@@ -137,6 +137,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const typewriterIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const pendingAudioRef = useRef<{ text: string; persona: VoicePersona } | null>(null);
 
   messagesRef.current = messages;
@@ -157,6 +158,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Stop any active audio playback node, HTML5 audio element, or speech synthesis utterance.
    */
   const stopAllPlayback = useCallback(() => {
+    if (typewriterIntervalRef.current) {
+      clearInterval(typewriterIntervalRef.current);
+      typewriterIntervalRef.current = null;
+    }
     if (currentSourceNodeRef.current) {
       try {
         currentSourceNodeRef.current.stop();
@@ -203,11 +208,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (ctx && ctx.state === "suspended") {
       try {
-        // Race resume() against a tight timeout so that if called without
-        // transient user activation, it does NOT hang execution indefinitely!
         await Promise.race([
-          ctx.resume(),
-          new Promise((resolve) => setTimeout(resolve, 80)),
+          ctx.resume().catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 150)),
         ]);
       } catch {}
     }
@@ -268,6 +271,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       updateStatus("listening");
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "InvalidStateError") {
+        return;
+      }
+      if (err instanceof Error && (err.name === "InvalidStateError" || err.message?.includes("already started"))) {
         return;
       }
       console.warn("Speech recognition start requires user gesture:", err);
@@ -459,6 +465,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           clearTimeout(ttsSafetyTimeoutRef.current);
           ttsSafetyTimeoutRef.current = null;
         }
+        if (typewriterIntervalRef.current) {
+          clearInterval(typewriterIntervalRef.current);
+          typewriterIntervalRef.current = null;
+        }
         currentSourceNodeRef.current = null;
         activeUtteranceRef.current = null;
         setAudioBlockedNotice(false);
@@ -510,40 +520,47 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const arrayBuffer = await response.arrayBuffer();
         if (!isMountedRef.current || !isSpeakingRef.current) return;
 
+        let activeCtx = ctx;
+        if (activeCtx && activeCtx.state === "suspended") {
+          try {
+            await activeCtx.resume();
+          } catch {}
+        }
+
         // Try playing via Web Audio API ONLY IF the context is actively running
-        if (ctx && ctx.state === "running") {
+        if (activeCtx && activeCtx.state === "running") {
           try {
             // Clone arrayBuffer before decodeAudioData so original buffer is not neutered if fallback is needed
             const bufferCopy = arrayBuffer.slice(0);
-            const audioBuffer = await ctx.decodeAudioData(bufferCopy);
+            const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
             if (!isMountedRef.current || !isSpeakingRef.current) return;
 
-            const source = ctx.createBufferSource();
+            const source = activeCtx.createBufferSource();
             source.buffer = audioBuffer;
 
             // Apply acoustic filter tailored to voice persona
             if (currentPersona === "ultron") {
               // Deep cyborg bass resonance + subtle pitch shift
-              const bassBoost = ctx.createBiquadFilter();
+              const bassBoost = activeCtx.createBiquadFilter();
               bassBoost.type = "lowshelf";
-              bassBoost.frequency.setValueAtTime(320, ctx.currentTime);
-              bassBoost.gain.setValueAtTime(5.5, ctx.currentTime);
+              bassBoost.frequency.setValueAtTime(320, activeCtx.currentTime);
+              bassBoost.gain.setValueAtTime(5.5, activeCtx.currentTime);
 
-              source.playbackRate.setValueAtTime(0.93, ctx.currentTime);
+              source.playbackRate.setValueAtTime(0.93, activeCtx.currentTime);
               source.connect(bassBoost);
-              bassBoost.connect(ctx.destination);
+              bassBoost.connect(activeCtx.destination);
             } else if (currentPersona === "jarvis") {
               // High-clarity articulate presence
-              const presence = ctx.createBiquadFilter();
+              const presence = activeCtx.createBiquadFilter();
               presence.type = "peaking";
-              presence.frequency.setValueAtTime(2900, ctx.currentTime);
-              presence.gain.setValueAtTime(2.8, ctx.currentTime);
+              presence.frequency.setValueAtTime(2900, activeCtx.currentTime);
+              presence.gain.setValueAtTime(2.8, activeCtx.currentTime);
 
-              source.playbackRate.setValueAtTime(1.0, ctx.currentTime);
+              source.playbackRate.setValueAtTime(1.0, activeCtx.currentTime);
               source.connect(presence);
-              presence.connect(ctx.destination);
+              presence.connect(activeCtx.destination);
             } else {
-              source.connect(ctx.destination);
+              source.connect(activeCtx.destination);
             }
 
             currentSourceNodeRef.current = source;
@@ -645,11 +662,40 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         setMessages(finalHistory);
         messagesRef.current = finalHistory;
 
+        // Synchronized typewriter effect for agent's spoken response
+        if (typewriterIntervalRef.current) {
+          clearInterval(typewriterIntervalRef.current);
+          typewriterIntervalRef.current = null;
+        }
+
+        const charSpeedMs = Math.max(18, Math.min(42, Math.floor(3500 / Math.max(reply.length, 1))));
+        let charIndex = 0;
+
         setDialogue({
           user: trimmed,
-          agent: reply,
+          agent: "",
           provider: `${provider.toUpperCase()} · ${VOICE_PERSONAS[selectedVoiceRef.current].label}`,
         });
+
+        typewriterIntervalRef.current = setInterval(() => {
+          if (!isMountedRef.current) {
+            if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
+            return;
+          }
+          charIndex += 1;
+          setDialogue((prev) => ({
+            user: trimmed,
+            agent: reply.slice(0, charIndex),
+            provider: `${provider.toUpperCase()} · ${VOICE_PERSONAS[selectedVoiceRef.current].label}`,
+          }));
+
+          if (charIndex >= reply.length) {
+            if (typewriterIntervalRef.current) {
+              clearInterval(typewriterIntervalRef.current);
+              typewriterIntervalRef.current = null;
+            }
+          }
+        }, charSpeedMs);
 
         isThinkingRef.current = false;
         void speakReply(reply);
@@ -663,6 +709,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       } catch (error) {
         console.error("Error communicating with /api/chat:", error);
         if (!isMountedRef.current) return;
+
+        if (typewriterIntervalRef.current) {
+          clearInterval(typewriterIntervalRef.current);
+          typewriterIntervalRef.current = null;
+        }
 
         const fallbackReply = "All systems operational. Telemetry indicates ready status.";
         setDialogue({
@@ -690,7 +741,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     const speech = (
       accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-    ).trim();
+    ).trim() || inputValue.trim();
 
     accumulatedFinalTranscriptRef.current = "";
     latestInterimTranscriptRef.current = "";
@@ -699,6 +750,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     setIsVoiceReplyMode(false);
     isVoiceReplyModeRef.current = false;
     setLiveUserTranscript("");
+    setInputValue("");
 
     if (!speech || isSpeakingRef.current || isThinkingRef.current) {
       return;
@@ -707,7 +759,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     // Stop listening while thinking and speaking so Ultron doesn't listen to his own speech
     stopListening();
     void processUtterance(speech);
-  }, [processUtterance, stopListening]);
+  }, [inputValue, processUtterance, stopListening]);
 
   /**
    * Manually stop speaking immediately and trigger the assistant to reply using voice.
@@ -723,7 +775,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     const speech = (
       accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-    ).trim();
+    ).trim() || inputValue.trim();
 
     accumulatedFinalTranscriptRef.current = "";
     latestInterimTranscriptRef.current = "";
@@ -732,6 +784,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     setIsVoiceReplyMode(false);
     isVoiceReplyModeRef.current = false;
     setLiveUserTranscript("");
+    setInputValue("");
 
     if (!speech) {
       setDialogue((prev) => ({
@@ -748,7 +801,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     stopListening();
     void processUtterance(speech);
-  }, [processUtterance, startListening, stopListening, unlockAudioSystems, updateStatus]);
+  }, [inputValue, processUtterance, startListening, stopListening, unlockAudioSystems, updateStatus]);
 
   /**
    * Cancels active user voice input
@@ -765,7 +818,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     setIsVoiceReplyMode(false);
     isVoiceReplyModeRef.current = false;
     setLiveUserTranscript("");
-    setDialogue((prev) => (prev?.user ? { ...prev, user: undefined, provider: "VOICE INPUT CANCELLED" } : prev));
+    setInputValue("");
+    setDialogue((prev) => (prev?.user ? { ...prev, user: undefined, provider: "VOICE DIRECTIVE CANCELLED" } : prev));
 
     if (isMicEnabledRef.current) {
       startListening();
@@ -812,6 +866,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     await unlockAudioSystems();
 
+    // Request microphone permission on user click
+    if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      } catch (err) {
+        console.warn("Microphone access request:", err);
+      }
+    }
+
     accumulatedFinalTranscriptRef.current = "";
     latestInterimTranscriptRef.current = "";
     setLiveUserTranscript("");
@@ -824,8 +888,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     setIsVoiceReplyMode(true);
     isVoiceReplyModeRef.current = true;
-    setIsUserSpeaking(true);
-    isUserSpeakingRef.current = true;
+    setIsUserSpeaking(false);
+    isUserSpeakingRef.current = false;
 
     setDialogue({
       user: "Listening... Speak your directive aloud",
@@ -866,8 +930,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     void speakReply(welcomeText);
   }, [speakReply, unlockAudioSystems]);
 
-  const toggleMic = useCallback(() => {
-    void unlockAudioSystems();
+  const toggleMic = useCallback(async () => {
+    await unlockAudioSystems();
+    if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      } catch {}
+    }
     setIsMicEnabled((prev) => {
       const next = !prev;
       isMicEnabledRef.current = next;
@@ -974,6 +1044,18 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     const text = inputValue.trim();
     if (!text) return;
     setInputValue("");
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    accumulatedFinalTranscriptRef.current = "";
+    latestInterimTranscriptRef.current = "";
+    setIsUserSpeaking(false);
+    isUserSpeakingRef.current = false;
+    setIsVoiceReplyMode(false);
+    isVoiceReplyModeRef.current = false;
+    setLiveUserTranscript("");
 
     // Unlock audio context synchronously during form submission gesture
     void unlockAudioSystems();
@@ -1141,11 +1223,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         isUserSpeakingRef.current = true;
         setLiveUserTranscript(fullTranscript);
 
+        // Autotype live speech directly into the input field in real time
+        setInputValue(fullTranscript);
+
         // Show live user speech in subtitles as they speak
         setDialogue((prev) => ({
           user: fullTranscript,
           agent: prev?.agent,
-          provider: prev?.provider,
+          provider: "MIC AUTOTYPING DIRECTIVE...",
         }));
 
         if (silenceTimerRef.current) {
@@ -1153,9 +1238,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
 
         // Voice activity silence window:
-        // Once user pauses after talking (800ms for finalized or 1200ms for interim),
-        // trigger agent response!
-        const silenceDelayMs = newlyFinalized.length > 0 ? 800 : 1200;
+        // Once user pauses after talking (850ms for finalized or 1250ms for interim),
+        // trigger agent response automatically!
+        const silenceDelayMs = newlyFinalized.length > 0 ? 850 : 1250;
         silenceTimerRef.current = setTimeout(() => {
           commitUserSpeech();
         }, silenceDelayMs);
@@ -1164,7 +1249,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     recognition.onerror = (event: SpeechRecognitionErrorEventItem) => {
       if (!isMountedRef.current) return;
-      if (event.error === "no-speech") {
+      if (event.error === "no-speech" || event.error === "aborted") {
         return;
       }
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
@@ -1234,6 +1319,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
       if (dialogueTimerRef.current) {
         clearTimeout(dialogueTimerRef.current);
+      }
+      if (typewriterIntervalRef.current) {
+        clearInterval(typewriterIntervalRef.current);
       }
       if (recognitionRef.current) {
         try {
@@ -1653,6 +1741,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "6px", flex: 1 }}>
                   <span style={{ color: "#ffaa30", fontWeight: "bold" }}>[ULTRON]:</span>
                   <span>{dialogue.agent}</span>
+                  {status === "speaking" && <span className="autotype-cursor" />}
 
                   {/* Animated Voice Equalizer when speaking */}
                   {status === "speaking" && (
@@ -1825,6 +1914,30 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           gap: "8px",
         }}
       >
+        {/* Activation Prompt if Gesture Required */}
+        {needsGesture && (
+          <button
+            type="button"
+            onClick={handleActivateVoice}
+            className="hud-btn voice-action-btn"
+            style={{
+              padding: "10px 18px",
+              fontSize: "12px",
+              letterSpacing: "0.12em",
+              borderRadius: "6px",
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              animation: "pulse 1.8s infinite ease-in-out",
+              boxShadow: "0 0 18px rgba(255, 170, 48, 0.4)",
+            }}
+          >
+            <span>🎙️ ACTIVATE ULTRON VOICE AGENT (CLICK TO ENABLE MIC &amp; AUDIO)</span>
+          </button>
+        )}
+
         {/* If Assistant is speaking: prominent Stop & Reply by Voice banner */}
         {status === "speaking" && (
           <button
@@ -1851,154 +1964,171 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           </button>
         )}
 
-        {/* If user is speaking or voice reply mode is active */}
-        {(isUserSpeaking || isVoiceReplyMode) ? (
-          <div
-            className="voice-input-panel"
-            style={{
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-            }}
-          >
+        {/* Interactive Chat Form with Live Speech Autotyping */}
+        <form
+          onSubmit={handleInputSubmit}
+          className={isUserSpeaking ? "speech-active-container" : ""}
+          style={{
+            display: "flex",
+            gap: "8px",
+            alignItems: "center",
+            background: isUserSpeaking ? "rgba(28, 14, 0, 0.94)" : "rgba(18, 9, 0, 0.8)",
+            border: isUserSpeaking ? "1px solid #ffaa30" : "1px solid rgba(255, 170, 48, 0.5)",
+            borderRadius: "6px",
+            padding: "5px 8px 5px 12px",
+            backdropFilter: "blur(6px)",
+            boxShadow: isUserSpeaking
+              ? "0 0 20px rgba(255, 140, 20, 0.3) inset, 0 0 14px rgba(255, 170, 48, 0.4)"
+              : "0 0 16px rgba(255, 140, 20, 0.18) inset, 0 4px 12px rgba(0,0,0,0.6)",
+            transition: "all 0.2s ease",
+          }}
+        >
+          {/* Prefix indicator: Equalizer when speaking, prompt chevron otherwise */}
+          {isUserSpeaking ? (
             <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <span className="voice-equalizer" title="Listening to User">
+              <span className="voice-equalizer" title="Listening to speech">
                 <span className="voice-eq-bar" />
                 <span className="voice-eq-bar" />
                 <span className="voice-eq-bar" />
                 <span className="voice-eq-bar" />
                 <span className="voice-eq-bar" />
               </span>
-              <span style={{ color: "#ff8800", fontWeight: "bold", fontSize: "11px", letterSpacing: "0.08em" }}>
-                VOICE:
+              <span className="autotype-badge">
+                AUTOTYPING
               </span>
             </div>
-
-            <div
-              style={{
-                flex: 1,
-                fontSize: "12px",
-                color: "#ffcc66",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                fontFamily: '"Courier New", monospace',
-              }}
-            >
-              {liveUserTranscript || dialogue?.user || "Listening... Speak your directive aloud"}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => void stopUserSpeakingAndReply()}
-              className="hud-btn voice-action-btn"
-              style={{
-                height: "36px",
-                padding: "0 14px",
-                fontSize: "11px",
-                borderRadius: "4px",
-                whiteSpace: "nowrap",
-                borderColor: "#ffcc66",
-                color: "#ffdd66",
-                boxShadow: "0 0 14px rgba(255, 170, 48, 0.4)",
-              }}
-              title="Stop speaking and transmit directive for voice reply"
-            >
-              ⏹️ STOP SPEAKING &amp; REPLY
-            </button>
-
-            <button
-              type="button"
-              onClick={cancelUserSpeaking}
-              className="hud-btn"
-              style={{
-                height: "36px",
-                padding: "0 10px",
-                fontSize: "12px",
-                borderRadius: "4px",
-              }}
-              title="Cancel voice input"
-            >
-              ✕
-            </button>
-          </div>
-        ) : (
-          <form
-            onSubmit={handleInputSubmit}
-            style={{
-              display: "flex",
-              gap: "8px",
-              alignItems: "center",
-              background: "rgba(18, 9, 0, 0.8)",
-              border: "1px solid rgba(255, 170, 48, 0.5)",
-              borderRadius: "6px",
-              padding: "4px 6px 4px 12px",
-              backdropFilter: "blur(6px)",
-              boxShadow: "0 0 16px rgba(255, 140, 20, 0.18) inset, 0 4px 12px rgba(0,0,0,0.6)",
-            }}
-          >
+          ) : (
             <span style={{ color: "#ffaa30", fontWeight: "bold", fontSize: "14px", opacity: 0.8 }}>&gt;</span>
+          )}
+
+          {/* Autotyping Input Field */}
+          <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
             <input
               type="text"
               value={inputValue}
               onFocus={() => {
                 void unlockAudioSystems();
               }}
-              onChange={(e) => setInputValue(e.target.value)}
+              onChange={(e) => {
+                setInputValue(e.target.value);
+                accumulatedFinalTranscriptRef.current = e.target.value;
+                latestInterimTranscriptRef.current = "";
+              }}
               onKeyDown={(e) => {
                 void unlockAudioSystems();
-                // Prevent propagation so global hotkeys (G, R, V, etc.) are not triggered while typing
                 e.stopPropagation();
               }}
-              placeholder="Type a directive, or click Reply Using Voice…"
+              placeholder={
+                status === "thinking"
+                  ? "Ultron is processing your voice directive..."
+                  : isUserSpeaking
+                  ? "Transcribing your speech in real time..."
+                  : isMicEnabled
+                  ? "Speak into mic to autotype directive, or type here…"
+                  : "Type a directive or click Voice Input…"
+              }
               style={{
-                flex: 1,
+                width: "100%",
                 background: "transparent",
                 border: "none",
                 outline: "none",
-                color: "#ffcc66",
+                color: isUserSpeaking ? "#ffdd66" : "#ffcc66",
                 fontFamily: '"Courier New", monospace',
                 fontSize: "13px",
                 letterSpacing: "0.05em",
+                textShadow: isUserSpeaking ? "0 0 8px rgba(255, 204, 102, 0.8)" : "none",
               }}
             />
+            {isUserSpeaking && <span className="autotype-cursor" />}
+          </div>
 
-            {/* Dedicated Reply Using Voice button */}
-            <button
-              type="button"
-              onClick={() => void startVoiceReply()}
-              className="hud-btn"
-              title="Reply using a voice"
-              style={{
-                height: "34px",
-                padding: "0 12px",
-                fontSize: "11px",
-                display: "flex",
-                alignItems: "center",
-                gap: "5px",
-                color: "#ffcc66",
-                borderColor: "rgba(255, 170, 48, 0.6)",
-                whiteSpace: "nowrap",
-              }}
-            >
-              <span>🎙️ REPLY USING VOICE</span>
-            </button>
+          {/* Actions: Send Now & Cancel if speaking; Voice Input & Transmit otherwise */}
+          {isUserSpeaking ? (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => void stopUserSpeakingAndReply()}
+                className="hud-btn voice-action-btn"
+                style={{
+                  height: "34px",
+                  padding: "0 12px",
+                  fontSize: "11px",
+                  borderRadius: "4px",
+                  borderColor: "#ffcc66",
+                  color: "#ffdd66",
+                  whiteSpace: "nowrap",
+                }}
+                title="Transmit speech directive immediately for voice response"
+              >
+                ⏹️ SEND NOW
+              </button>
+              <button
+                type="button"
+                onClick={cancelUserSpeaking}
+                className="hud-btn"
+                style={{
+                  height: "34px",
+                  padding: "0 9px",
+                  fontSize: "12px",
+                  borderRadius: "4px",
+                }}
+                title="Cancel voice input"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => void startVoiceReply()}
+                className="hud-btn"
+                title="Speak through microphone to autotype directive"
+                style={{
+                  height: "34px",
+                  padding: "0 12px",
+                  fontSize: "11px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "5px",
+                  color: isVoiceReplyMode ? "#ffdd66" : "#ffcc66",
+                  borderColor: isVoiceReplyMode ? "#ffcc66" : "rgba(255, 170, 48, 0.6)",
+                  background: isVoiceReplyMode ? "rgba(80, 40, 0, 0.7)" : undefined,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span>🎙️ VOICE INPUT</span>
+              </button>
 
-            <button
-              type="submit"
-              disabled={!inputValue.trim() || status === "thinking"}
-              className="hud-btn"
-              style={{
-                height: "34px",
-                padding: "0 14px",
-                fontSize: "12px",
-                opacity: inputValue.trim() ? 1 : 0.45,
-              }}
-            >
-              TRANSMIT
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={!inputValue.trim() || status === "thinking"}
+                className="hud-btn"
+                style={{
+                  height: "34px",
+                  padding: "0 14px",
+                  fontSize: "12px",
+                  opacity: inputValue.trim() && status !== "thinking" ? 1 : 0.45,
+                }}
+              >
+                TRANSMIT
+              </button>
+            </div>
+          )}
+        </form>
+
+        {/* Real-time autotype guidance */}
+        {isUserSpeaking && (
+          <div
+            style={{
+              fontSize: "10px",
+              color: "rgba(255, 200, 100, 0.75)",
+              textAlign: "center",
+              letterSpacing: "0.08em",
+            }}
+          >
+            PAUSE SPEAKING TO AUTO-TRANSMIT &amp; HEAR VOICE RESPONSE
+          </div>
         )}
       </div>
     </>

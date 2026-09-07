@@ -346,3 +346,42 @@ body {
   }
 }
 
+/* Autotype cursor & indicator */
+.autotype-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background-color: #ffaa30;
+  vertical-align: middle;
+  margin-left: 2px;
+  animation: blink-cursor 0.75s infinite ease-in-out;
+  box-shadow: 0 0 8px #ffaa30;
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.speech-active-container {
+  border-color: rgba(255, 170, 48, 0.95) !important;
+  box-shadow: 0 0 22px rgba(255, 140, 20, 0.35) inset, 0 0 16px rgba(255, 170, 48, 0.5) !important;
+  animation: pulse-panel 1.5s infinite ease-in-out;
+}
+
+.autotype-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  background: rgba(255, 140, 0, 0.2);
+  border: 1px solid rgba(255, 170, 48, 0.6);
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #ffcc66;
+  text-shadow: 0 0 6px rgba(255, 170, 48, 0.8);
+  white-space: nowrap;
+}
+
+
