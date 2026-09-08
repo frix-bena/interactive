@@ -181,6 +181,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const keepAliveOscRef = useRef<OscillatorNode | null>(null);
+  const persistentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
   const typewriterIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -212,16 +214,18 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Stop any active audio playback node, HTML5 audio element, or speech synthesis utterance.
    */
   const stopAllPlayback = useCallback(() => {
-    if (typewriterIntervalRef.current) {
-      clearInterval(typewriterIntervalRef.current);
-      typewriterIntervalRef.current = null;
-    }
     if (currentSourceNodeRef.current) {
       try {
         currentSourceNodeRef.current.stop();
         currentSourceNodeRef.current.disconnect();
       } catch {}
       currentSourceNodeRef.current = null;
+    }
+    if (persistentAudioRef.current) {
+      try {
+        persistentAudioRef.current.pause();
+        persistentAudioRef.current.currentTime = 0;
+      } catch {}
     }
     if (audioElementRef.current) {
       try {
@@ -243,7 +247,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
   /**
    * Unlock Web Audio & browser audio elements on user interaction.
-   * A running AudioContext permanently bypasses async autoplay restrictions.
+   * Attaches a silent keep-alive node so Chromium/Brave never auto-suspends AudioContext.
    */
   const unlockAudioSystems = useCallback(async (): Promise<AudioContext | null> => {
     if (typeof window === "undefined") return null;
@@ -268,12 +272,33 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     }
 
     if (ctx && ctx.state === "running") {
+      // Attach persistent silent keep-alive oscillator to keep AudioContext active in Chromium/Brave
+      if (!keepAliveOscRef.current) {
+        try {
+          const keepAliveGain = ctx.createGain();
+          keepAliveGain.gain.setValueAtTime(0.00001, ctx.currentTime);
+          const osc = ctx.createOscillator();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(120, ctx.currentTime);
+          osc.connect(keepAliveGain);
+          keepAliveGain.connect(ctx.destination);
+          osc.start();
+          keepAliveOscRef.current = osc;
+        } catch {}
+      }
+    }
+
+    // Prime the persistent HTML5 audio element with user gesture blessing
+    if (persistentAudioRef.current) {
       try {
-        const silentBuf = ctx.createBuffer(1, 1, 22050);
-        const silentSrc = ctx.createBufferSource();
-        silentSrc.buffer = silentBuf;
-        silentSrc.connect(ctx.destination);
-        silentSrc.start(0);
+        const audio = persistentAudioRef.current;
+        if (!audio.src || audio.src === window.location.href) {
+          audio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+          const p = audio.play();
+          if (p !== undefined) {
+            p.then(() => audio.pause()).catch(() => {});
+          }
+        }
       } catch {}
     }
 
@@ -394,6 +419,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
+      if (!isMountedRef.current) {
+        onFinish();
+        return;
+      }
+
+      isSpeakingRef.current = true;
+      isThinkingRef.current = false;
+      updateStatus("speaking");
+
       try {
         window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) {
@@ -401,86 +435,102 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
       } catch {}
 
-      if (!isMountedRef.current || !isSpeakingRef.current) {
-        onFinish();
-        return;
-      }
-
-      try {
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.volume = 1.0;
-
-        const voices = window.speechSynthesis.getVoices();
-        if (voices.length > 0) {
-          let preferredVoice: SpeechSynthesisVoice | undefined;
-
-          if (persona === "jarvis") {
-            preferredVoice =
-              voices.find(
-                (v) =>
-                  (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
-                  /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
-              ) ||
-              voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB"));
-            utterance.rate = 1.0;
-            utterance.pitch = 0.98;
-          } else if (persona === "ultron") {
-            preferredVoice =
-              voices.find(
-                (v) =>
-                  v.lang.startsWith("en") &&
-                  /David|Guy|Mark|Google UK English Male|Google US English/i.test(v.name)
-              ) || voices.find((v) => v.lang.startsWith("en"));
-            utterance.rate = 0.93;
-            utterance.pitch = 0.82;
-          } else if (persona === "friday") {
-            preferredVoice =
-              voices.find(
-                (v) =>
-                  v.lang.startsWith("en") &&
-                  /Samantha|Victoria|Zira|Jenny|Google US English|Natural/i.test(v.name)
-              ) || voices.find((v) => v.lang.startsWith("en"));
-            utterance.rate = 1.03;
-            utterance.pitch = 1.06;
-          } else {
-            preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
-            utterance.rate = 1.0;
-            utterance.pitch = 1.0;
-          }
-
-          if (preferredVoice) {
-            utterance.voice = preferredVoice;
-          }
+      // Short 50ms buffer ensures asynchronous cancel() completes in Chromium before speak()
+      setTimeout(() => {
+        if (!isMountedRef.current) {
+          onFinish();
+          return;
         }
 
-        let finished = false;
-        const complete = () => {
-          if (!finished) {
-            finished = true;
-            (window as unknown as { __activeUtterance?: unknown }).__activeUtterance = null;
-            onFinish();
+        try {
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.volume = 1.0;
+
+          const voices = window.speechSynthesis.getVoices();
+          if (voices.length > 0) {
+            let preferredVoice: SpeechSynthesisVoice | undefined;
+
+            if (persona === "jarvis") {
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
+                    /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
+                ) ||
+                voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB"));
+              utterance.rate = 1.0;
+              utterance.pitch = 0.98;
+            } else if (persona === "ultron") {
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    v.lang.startsWith("en") &&
+                    /David|Guy|Mark|Google UK English Male|Google US English/i.test(v.name)
+                ) || voices.find((v) => v.lang.startsWith("en"));
+              utterance.rate = 0.93;
+              utterance.pitch = 0.82;
+            } else if (persona === "friday") {
+              preferredVoice =
+                voices.find(
+                  (v) =>
+                    v.lang.startsWith("en") &&
+                    /Samantha|Victoria|Zira|Jenny|Google US English|Natural/i.test(v.name)
+                ) || voices.find((v) => v.lang.startsWith("en"));
+              utterance.rate = 1.03;
+              utterance.pitch = 1.06;
+            } else {
+              preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
+              utterance.rate = 1.0;
+              utterance.pitch = 1.0;
+            }
+
+            if (preferredVoice) {
+              utterance.voice = preferredVoice;
+            }
           }
-        };
 
-        utterance.onend = complete;
-        utterance.onerror = () => {
-          complete();
-        };
+          let finished = false;
+          let keepAliveTimer: NodeJS.Timeout | null = null;
 
-        // Window-level reference prevents Chrome garbage-collection bug
-        (window as unknown as { __activeUtterance?: unknown }).__activeUtterance = utterance;
-        activeUtteranceRef.current = utterance;
-        window.speechSynthesis.speak(utterance);
-      } catch {
-        onFinish();
-      }
+          const complete = () => {
+            if (!finished) {
+              finished = true;
+              if (keepAliveTimer) clearInterval(keepAliveTimer);
+              (window as unknown as { __activeUtterance?: unknown }).__activeUtterance = null;
+              activeUtteranceRef.current = null;
+              onFinish();
+            }
+          };
+
+          utterance.onend = complete;
+          utterance.onerror = complete;
+
+          // Chromium speech synthesis bug workaround: keep-alive resume every 5s
+          keepAliveTimer = setInterval(() => {
+            if (typeof window !== "undefined" && "speechSynthesis" in window) {
+              if (window.speechSynthesis.speaking && !finished) {
+                window.speechSynthesis.pause();
+                window.speechSynthesis.resume();
+              } else {
+                if (keepAliveTimer) clearInterval(keepAliveTimer);
+              }
+            }
+          }, 5000);
+
+          (window as unknown as { __activeUtterance?: unknown }).__activeUtterance = utterance;
+          activeUtteranceRef.current = utterance;
+          window.speechSynthesis.speak(utterance);
+        } catch {
+          onFinish();
+        }
+      }, 50);
     },
-    []
+    [updateStatus]
   );
 
   /**
    * Main speech playback engine:
-   * Multi-stage resilient pipeline with Web Audio API, HTML5 Audio, and SpeechSynthesis fallback.
+   * Multi-stage resilient pipeline with Web Audio API, persistent HTML5 Audio, and SpeechSynthesis fallback.
    */
   const speakReply = useCallback(
     async (text: string, voicePersonaOverride?: VoicePersona) => {
@@ -493,6 +543,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
       if (!cleanText) {
         isSpeakingRef.current = false;
+        isThinkingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
         if (isMicEnabledRef.current) startListeningRef.current();
         return;
@@ -500,6 +551,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
       if (isVoiceMutedRef.current) {
         isSpeakingRef.current = false;
+        isThinkingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
         if (isMicEnabledRef.current) startListeningRef.current();
         return;
@@ -514,6 +566,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       stopListening();
 
       isSpeakingRef.current = true;
+      isThinkingRef.current = false;
       updateStatus("speaking");
 
       // Pre-unlock AudioContext if needed
@@ -525,7 +578,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           console.warn("[VoiceBot] ctx.resume failed:", e);
         }
       }
-      console.log("[VoiceBot] ctx.state after pre-unlock:", ctx?.state);
       playJarvisChirp();
 
       let isFinished = false;
@@ -539,11 +591,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           ttsSafetyTimeoutRef.current = null;
         }
 
-        // CRITICAL FIX: NEVER clear or truncate the agent dialogue on audio finish!
-        if (typewriterIntervalRef.current) {
-          clearInterval(typewriterIntervalRef.current);
-          typewriterIntervalRef.current = null;
-        }
         // Ensure dialogue displays the full reply text
         setDialogue((prev) => (prev ? { ...prev, agent: cleanText } : null));
 
@@ -552,12 +599,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
         if (!isMountedRef.current) return;
         isSpeakingRef.current = false;
+        isThinkingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
 
         // Delay resuming listening by 400ms to avoid audio reverb picking up
         if (isMicEnabledRef.current) {
           setTimeout(() => {
-            if (isMountedRef.current && !isSpeakingRef.current && isMicEnabledRef.current) {
+            if (isMountedRef.current && !isSpeakingRef.current && !isThinkingRef.current && isMicEnabledRef.current) {
               startListeningRef.current();
             }
           }, 400);
@@ -580,10 +628,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      // 1. Primary: Server-Side TTS with Web Audio decoding (with 15s timeout)
+      // 1. Primary: Server-Side TTS with Web Audio decoding
       try {
         const controller = new AbortController();
-        const ttsFetchTimeout = setTimeout(() => controller.abort(), 15000);
+        const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
 
         console.log("[VoiceBot] Fetching /api/tts...");
         const response = await fetch("/api/tts", {
@@ -604,7 +652,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const arrayBuffer = await response.arrayBuffer();
         console.log("[VoiceBot] Fetched TTS buffer, bytes:", arrayBuffer.byteLength);
         if (!isMountedRef.current || !isSpeakingRef.current) {
-          console.warn("[VoiceBot] speakReply aborted: isMounted=", isMountedRef.current, "isSpeaking=", isSpeakingRef.current);
           return;
         }
 
@@ -618,13 +665,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         console.log("[VoiceBot] activeCtx state:", activeCtx?.state);
         if (activeCtx && activeCtx.state === "running") {
           try {
-            // Clone arrayBuffer before decodeAudioData so original buffer is not neutered if fallback is needed
             const bufferCopy = arrayBuffer.slice(0);
-            console.log("[VoiceBot] Calling activeCtx.decodeAudioData...");
             const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
-            console.log("[VoiceBot] decodeAudioData succeeded, duration:", audioBuffer.duration);
             if (!isMountedRef.current || !isSpeakingRef.current) {
-              console.warn("[VoiceBot] speakReply aborted after decode: isSpeaking=", isSpeakingRef.current);
               return;
             }
 
@@ -665,7 +708,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               handleFinished("webaudio-ended");
             };
 
-            console.log("[VoiceBot] Calling source.start(0)...");
             source.start(0);
             return;
           } catch (webAudioErr) {
@@ -673,14 +715,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           }
         }
 
-        // 2. Secondary: HTML5 Audio Element playback
+        // 2. Secondary: Primed persistent HTML5 Audio Element playback
         try {
-          console.log("[VoiceBot] Falling back to HTML5 audio element...");
+          console.log("[VoiceBot] Falling back to primed HTML5 audio element...");
           const contentType = response.headers.get("content-type") || "audio/mpeg";
           const blob = new Blob([arrayBuffer], { type: contentType });
           const audioUrl = URL.createObjectURL(blob);
-          const audio = new Audio(audioUrl);
+          const audio = persistentAudioRef.current || new Audio();
           audioElementRef.current = audio;
+          audio.src = audioUrl;
           audio.volume = 1.0;
 
           audio.onended = () => {
@@ -697,22 +740,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
           const playPromise = audio.play();
           if (playPromise !== undefined) {
-            playPromise.then(() => {
-              console.log("[VoiceBot] HTML5 audio playPromise resolved!");
-            }).catch((playErr) => {
-              console.warn("HTML5 audio playback blocked by autoplay policy:", playErr);
-              setPendingVoiceAudio({
-                play: () => {
-                  void audio.play().catch(() => {});
-                },
-                text: cleanText,
+            playPromise
+              .then(() => {
+                console.log("[VoiceBot] HTML5 audio playPromise resolved!");
+              })
+              .catch((playErr) => {
+                console.warn("HTML5 audio playback blocked, immediately falling back to speech synthesis:", playErr);
+                URL.revokeObjectURL(audioUrl);
+                fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
               });
-              handleFinished("html5-blocked");
-            });
           }
           return;
         } catch (playErr) {
-          console.warn("HTML5 audio setup error:", playErr);
+          console.warn("HTML5 audio setup error, falling back to speech synthesis:", playErr);
           fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
           return;
         }
@@ -816,7 +856,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           }
         }, charSpeedMs);
 
-        isThinkingRef.current = false;
+        // Keep isThinkingRef.current true until speakReply engages isSpeakingRef.current
         void speakReplyRef.current(reply);
 
         // Auto-fade dialogue after 25 seconds of inactivity
@@ -847,7 +887,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           provider: "OFFLINE COGNITION",
         });
 
-        isThinkingRef.current = false;
         void speakReplyRef.current(fallbackReply);
       }
     },
@@ -870,13 +909,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       speechEndTimerRef.current = null;
     }
 
-    // Only commit actual spoken transcripts, never steal typed keyboard input!
+    // Combine spoken transcript, falling back to input value if user spoke
     const speech = (
       accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-    ).trim();
+    ).trim() || (isUserSpeakingRef.current ? inputValueRef.current.trim() : "");
 
     accumulatedFinalTranscriptRef.current = "";
     latestInterimTranscriptRef.current = "";
+    inputValueRef.current = "";
+    setInputValue("");
     setIsUserSpeaking(false);
     isUserSpeakingRef.current = false;
     setIsVoiceReplyMode(false);
@@ -887,11 +928,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       return;
     }
 
-    // If assistant was speaking, barge-in!
+    // Stop assistant speech if it was speaking (barge-in)
     if (isSpeakingRef.current) {
       stopAllPlayback();
       isSpeakingRef.current = false;
     }
+
+    // Pre-mark thinking state so onend/timers don't re-trigger or restart listening prematurely
+    isThinkingRef.current = true;
+    updateStatus("thinking");
 
     // Play immediate receipt blip
     playReceiveChirp();
@@ -899,7 +944,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     // Stop listening while thinking and speaking so Ultron doesn't listen to his own speech
     stopListening();
     void processUtteranceRef.current(speech);
-  }, [playReceiveChirp, stopAllPlayback, stopListening]);
+  }, [playReceiveChirp, stopAllPlayback, stopListening, updateStatus]);
 
   commitUserSpeechRef.current = commitUserSpeech;
 
@@ -1415,12 +1460,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       speechEndTimerRef.current = setTimeout(() => {
         const pending = (
           accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-        ).trim();
+        ).trim() || (isUserSpeakingRef.current ? inputValueRef.current.trim() : "");
 
         if (pending && !isSpeakingRef.current && !isThinkingRef.current) {
           commitUserSpeechRef.current();
         }
-      }, 400);
+      }, 750);
     };
 
     // Fired when sound ends (backup for speech end)
@@ -1433,12 +1478,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         speechEndTimerRef.current = setTimeout(() => {
           const pending = (
             accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-          ).trim();
+          ).trim() || (isUserSpeakingRef.current ? inputValueRef.current.trim() : "");
 
           if (pending && !isSpeakingRef.current && !isThinkingRef.current) {
             commitUserSpeechRef.current();
           }
-        }, 500);
+        }, 850);
       }
     };
 
@@ -1492,8 +1537,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
 
         // Voice activity silence window:
-        // Give natural conversational pause (1000ms for finalized or 1400ms for interim)
-        const silenceDelayMs = newlyFinalized.length > 0 ? 1000 : 1400;
+        // Natural conversational pause: 1100ms for finalized or 1500ms for interim
+        const silenceDelayMs = newlyFinalized.length > 0 ? 1100 : 1500;
         silenceTimerRef.current = setTimeout(() => {
           commitUserSpeechRef.current();
         }, silenceDelayMs);
@@ -1543,7 +1588,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       // If user had spoken and recognizer ended, process speech immediately
       const pendingSpeech = (
         accumulatedFinalTranscriptRef.current + " " + latestInterimTranscriptRef.current
-      ).trim();
+      ).trim() || (isUserSpeakingRef.current ? inputValueRef.current.trim() : "");
 
       if (pendingSpeech && !isSpeakingRef.current && !isThinkingRef.current) {
         commitUserSpeechRef.current();
@@ -1604,6 +1649,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
       if (typewriterIntervalRef.current) {
         clearInterval(typewriterIntervalRef.current);
+      }
+      if (keepAliveOscRef.current) {
+        try {
+          keepAliveOscRef.current.stop();
+          keepAliveOscRef.current.disconnect();
+        } catch {}
+        keepAliveOscRef.current = null;
       }
       if (recognitionRef.current) {
         try {
@@ -2420,6 +2472,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           </div>
         )}
       </div>
+
+      {/* Hidden primed audio element for seamless cross-browser speech playback */}
+      <audio ref={persistentAudioRef} preload="auto" playsInline style={{ display: "none" }} />
     </>
   );
 }

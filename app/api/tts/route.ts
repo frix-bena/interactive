@@ -77,6 +77,7 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
         return reject(new Error("All Google TTS endpoints exhausted"));
       }
 
+      let settled = false;
       const url = endpoints[index];
       const req = https.get(
         url,
@@ -91,29 +92,42 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
         (res) => {
           if (res.statusCode !== 200) {
             req.destroy();
-            return tryEndpoint(index + 1);
+            if (!settled) {
+              settled = true;
+              tryEndpoint(index + 1);
+            }
+            return;
           }
 
           const data: Buffer[] = [];
           res.on("data", (chunkBuffer: Buffer) => data.push(chunkBuffer));
           res.on("end", () => {
-            const combined = Buffer.concat(data);
-            if (combined.length > 0) {
-              resolve(combined);
-            } else {
-              tryEndpoint(index + 1);
+            if (!settled) {
+              settled = true;
+              const combined = Buffer.concat(data);
+              if (combined.length > 0) {
+                resolve(combined);
+              } else {
+                tryEndpoint(index + 1);
+              }
             }
           });
         }
       );
 
-      req.setTimeout(6500, () => {
+      req.setTimeout(5000, () => {
         req.destroy();
-        tryEndpoint(index + 1);
+        if (!settled) {
+          settled = true;
+          tryEndpoint(index + 1);
+        }
       });
 
       req.on("error", () => {
-        tryEndpoint(index + 1);
+        if (!settled) {
+          settled = true;
+          tryEndpoint(index + 1);
+        }
       });
     }
 
@@ -242,11 +256,9 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
 
   try {
     const chunks = splitIntoChunks(clean);
-    const chunkBuffers: Buffer[] = [];
-    for (const chunk of chunks) {
-      const buf = await fetchGoogleTTS(chunk, googleLang);
-      chunkBuffers.push(buf);
-    }
+    const chunkBuffers = await Promise.all(
+      chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang))
+    );
     const combined = Buffer.concat(chunkBuffers);
 
     if (audioCache.size >= MAX_CACHE_SIZE) {
