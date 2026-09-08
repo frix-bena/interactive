@@ -242,7 +242,11 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
 
   try {
     const chunks = splitIntoChunks(clean);
-    const chunkBuffers = await Promise.all(chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang)));
+    const chunkBuffers: Buffer[] = [];
+    for (const chunk of chunks) {
+      const buf = await fetchGoogleTTS(chunk, googleLang);
+      chunkBuffers.push(buf);
+    }
     const combined = Buffer.concat(chunkBuffers);
 
     if (audioCache.size >= MAX_CACHE_SIZE) {
@@ -255,9 +259,13 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
   } catch (err) {
     console.warn("Google TTS failed, attempting system espeak-ng fallback:", err);
     // 3. Fallback to system espeak-ng if available
-    const espeakBuffer = await generateEspeakTTS(clean, vKey);
-    if (espeakBuffer) {
-      return { buffer: espeakBuffer, engine: `system-espeak-${vKey}`, contentType: "audio/wav" };
+    try {
+      const espeakBuffer = await generateEspeakTTS(clean, vKey);
+      if (espeakBuffer) {
+        return { buffer: espeakBuffer, engine: `system-espeak-${vKey}`, contentType: "audio/wav" };
+      }
+    } catch (espeakErr) {
+      console.warn("espeak-ng invocation error:", espeakErr);
     }
     throw err;
   }

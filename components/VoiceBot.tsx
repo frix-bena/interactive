@@ -142,13 +142,13 @@ function generateClientOfflineReply(query: string): string {
 }
 
 export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
-  const [status, setStatus] = useState<AgentState>("listening");
+  const [status, setStatus] = useState<AgentState>("idle");
   const [isUserSpeaking, setIsUserSpeaking] = useState<boolean>(false);
   const [isVoiceReplyMode, setIsVoiceReplyMode] = useState<boolean>(false);
   const [, setLiveUserTranscript] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState<string>("");
-  const [isMicEnabled, setIsMicEnabled] = useState<boolean>(true);
+  const [isMicEnabled, setIsMicEnabled] = useState<boolean>(false);
   const [isVoiceMuted, setIsVoiceMuted] = useState<boolean>(false);
   const [selectedVoice, setSelectedVoice] = useState<VoicePersona>("jarvis");
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState<boolean>(false);
@@ -156,7 +156,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [hasIntroPlayed, setHasIntroPlayed] = useState<boolean>(false);
   const [needsInteraction, setNeedsInteraction] = useState<boolean>(false);
-  const [pendingPlayFn, setPendingPlayFn] = useState<(() => void) | null>(null);
+  const [pendingVoiceAudio, setPendingVoiceAudio] = useState<{ play: () => void; text: string } | null>(null);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isRecognitionActiveRef = useRef<boolean>(false);
@@ -166,7 +166,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isThinkingRef = useRef<boolean>(false);
   const isUserSpeakingRef = useRef<boolean>(false);
   const isVoiceReplyModeRef = useRef<boolean>(false);
-  const isMicEnabledRef = useRef<boolean>(true);
+  const isMicEnabledRef = useRef<boolean>(false);
   const isVoiceMutedRef = useRef<boolean>(false);
   const selectedVoiceRef = useRef<VoicePersona>("jarvis");
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -184,8 +184,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
   const typewriterIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-
 
   // Stable function refs to prevent React effect tear-down cycles
   const commitUserSpeechRef = useRef<() => void>(() => {});
@@ -240,14 +238,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       clearTimeout(ttsSafetyTimeoutRef.current);
       ttsSafetyTimeoutRef.current = null;
     }
-    setPendingPlayFn(null);
+    setPendingVoiceAudio(null);
   }, []);
 
   /**
    * Unlock Web Audio & browser audio elements on user interaction.
    * A running AudioContext permanently bypasses async autoplay restrictions.
    */
-  const unlockAudioSystems = useCallback((): AudioContext | null => {
+  const unlockAudioSystems = useCallback(async (): Promise<AudioContext | null> => {
     if (typeof window === "undefined") return null;
 
     let ctx = audioContextRef.current;
@@ -265,7 +263,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (ctx && ctx.state === "suspended") {
       try {
-        ctx.resume().catch(() => {});
+        await ctx.resume();
       } catch {}
     }
 
@@ -279,14 +277,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       } catch {}
     }
 
-    // Prepare HTML5 Audio element once
-    if (!audioElementRef.current) {
-      try {
-        const silentAudio = new Audio();
-        audioElementRef.current = silentAudio;
-      } catch {}
-    }
-
     // Prepare SpeechSynthesis
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
@@ -297,6 +287,24 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     }
 
     return ctx;
+  }, []);
+
+  /**
+   * Request native browser microphone access via getUserMedia.
+   * This triggers the browser permission prompt if not yet granted.
+   */
+  const ensureMicrophoneAccess = useCallback(async (): Promise<boolean> => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return false;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      return true;
+    } catch (err) {
+      console.warn("Microphone access prompt error:", err);
+      return false;
+    }
   }, []);
 
   const startListening = useCallback(() => {
@@ -324,7 +332,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const stopListening = useCallback(() => {
     if (recognitionRef.current && isRecognitionActiveRef.current) {
       try {
-        recognitionRef.current.stop();
+        recognitionRef.current.abort(); // Force abort so pending audio buffers are cleanly discarded
       } catch {}
       isRecognitionActiveRef.current = false;
     }
@@ -497,6 +505,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
+      console.log("[VoiceBot] speakReply called with:", cleanText.slice(0, 50), "persona:", currentPersona);
+
       // Stop any existing speech / audio playback
       stopAllPlayback();
 
@@ -507,18 +517,22 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       updateStatus("speaking");
 
       // Pre-unlock AudioContext if needed
-      const ctx = unlockAudioSystems();
+      const ctx = await unlockAudioSystems();
       if (ctx && ctx.state === "suspended") {
         try {
           await ctx.resume();
-        } catch {}
+        } catch (e) {
+          console.warn("[VoiceBot] ctx.resume failed:", e);
+        }
       }
+      console.log("[VoiceBot] ctx.state after pre-unlock:", ctx?.state);
       playJarvisChirp();
 
       let isFinished = false;
-      const handleFinished = () => {
+      const handleFinished = (reason = "normal") => {
         if (isFinished) return;
         isFinished = true;
+        console.log("[VoiceBot] handleFinished called, reason:", reason);
 
         if (ttsSafetyTimeoutRef.current) {
           clearTimeout(ttsSafetyTimeoutRef.current);
@@ -551,24 +565,27 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       };
 
       // Generous safety timer so speech completes naturally without hanging forever
-      const estimatedDurationMs = Math.max(6000, Math.min(25000, (cleanText.length / 7) * 1000 + 4000));
+      const estimatedDurationMs = Math.max(8000, Math.min(35000, (cleanText.length / 6) * 1000 + 5000));
       ttsSafetyTimeoutRef.current = setTimeout(() => {
         if (isSpeakingRef.current) {
-          handleFinished();
+          console.warn("[VoiceBot] Voice playback safety timeout reached!");
+          handleFinished("safety-timeout");
         }
       }, estimatedDurationMs);
 
       // If user selected native browser engine directly
       if (currentPersona === "system") {
-        fallbackSpeechSynthesis(cleanText, "system", handleFinished);
+        console.log("[VoiceBot] Using system persona speech synthesis");
+        fallbackSpeechSynthesis(cleanText, "system", () => handleFinished("speech-synthesis"));
         return;
       }
 
-      // 1. Primary: Server-Side TTS with Web Audio decoding (with 12s timeout)
+      // 1. Primary: Server-Side TTS with Web Audio decoding (with 15s timeout)
       try {
         const controller = new AbortController();
-        const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
+        const ttsFetchTimeout = setTimeout(() => controller.abort(), 15000);
 
+        console.log("[VoiceBot] Fetching /api/tts...");
         const response = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -585,47 +602,70 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
 
         const arrayBuffer = await response.arrayBuffer();
-        if (!isMountedRef.current || !isSpeakingRef.current) return;
+        console.log("[VoiceBot] Fetched TTS buffer, bytes:", arrayBuffer.byteLength);
+        if (!isMountedRef.current || !isSpeakingRef.current) {
+          console.warn("[VoiceBot] speakReply aborted: isMounted=", isMountedRef.current, "isSpeaking=", isSpeakingRef.current);
+          return;
+        }
 
         let activeCtx = audioContextRef.current || ctx;
+        if (activeCtx && activeCtx.state === "suspended") {
+          try {
+            await activeCtx.resume();
+          } catch {}
+        }
+
+        console.log("[VoiceBot] activeCtx state:", activeCtx?.state);
         if (activeCtx && activeCtx.state === "running") {
           try {
             // Clone arrayBuffer before decodeAudioData so original buffer is not neutered if fallback is needed
             const bufferCopy = arrayBuffer.slice(0);
+            console.log("[VoiceBot] Calling activeCtx.decodeAudioData...");
             const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
-            if (!isMountedRef.current || !isSpeakingRef.current) return;
+            console.log("[VoiceBot] decodeAudioData succeeded, duration:", audioBuffer.duration);
+            if (!isMountedRef.current || !isSpeakingRef.current) {
+              console.warn("[VoiceBot] speakReply aborted after decode: isSpeaking=", isSpeakingRef.current);
+              return;
+            }
 
             const source = activeCtx.createBufferSource();
             source.buffer = audioBuffer;
+
+            const gainNode = activeCtx.createGain();
+            gainNode.gain.setValueAtTime(1.0, activeCtx.currentTime);
 
             // Apply acoustic filter tailored to voice persona
             if (currentPersona === "ultron") {
               const bassBoost = activeCtx.createBiquadFilter();
               bassBoost.type = "lowshelf";
               bassBoost.frequency.setValueAtTime(320, activeCtx.currentTime);
-              bassBoost.gain.setValueAtTime(5.5, activeCtx.currentTime);
+              bassBoost.gain.setValueAtTime(4.5, activeCtx.currentTime);
 
-              source.playbackRate.setValueAtTime(0.93, activeCtx.currentTime);
+              source.playbackRate.setValueAtTime(0.95, activeCtx.currentTime);
               source.connect(bassBoost);
-              bassBoost.connect(activeCtx.destination);
+              bassBoost.connect(gainNode);
             } else if (currentPersona === "jarvis") {
               const presence = activeCtx.createBiquadFilter();
               presence.type = "peaking";
-              presence.frequency.setValueAtTime(2900, activeCtx.currentTime);
-              presence.gain.setValueAtTime(2.8, activeCtx.currentTime);
+              presence.frequency.setValueAtTime(2800, activeCtx.currentTime);
+              presence.gain.setValueAtTime(2.2, activeCtx.currentTime);
 
               source.playbackRate.setValueAtTime(1.0, activeCtx.currentTime);
               source.connect(presence);
-              presence.connect(activeCtx.destination);
+              presence.connect(gainNode);
             } else {
-              source.connect(activeCtx.destination);
+              source.connect(gainNode);
             }
+
+            gainNode.connect(activeCtx.destination);
 
             currentSourceNodeRef.current = source;
             source.onended = () => {
-              handleFinished();
+              console.log("[VoiceBot] Web Audio source.onended fired");
+              handleFinished("webaudio-ended");
             };
 
+            console.log("[VoiceBot] Calling source.start(0)...");
             source.start(0);
             return;
           } catch (webAudioErr) {
@@ -635,46 +675,50 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
         // 2. Secondary: HTML5 Audio Element playback
         try {
+          console.log("[VoiceBot] Falling back to HTML5 audio element...");
           const contentType = response.headers.get("content-type") || "audio/mpeg";
           const blob = new Blob([arrayBuffer], { type: contentType });
           const audioUrl = URL.createObjectURL(blob);
-          let audio = audioElementRef.current;
-          if (!audio) {
-            audio = new Audio();
-            audioElementRef.current = audio;
-          }
-          audio.src = audioUrl;
+          const audio = new Audio(audioUrl);
+          audioElementRef.current = audio;
           audio.volume = 1.0;
 
           audio.onended = () => {
+            console.log("[VoiceBot] HTML5 audio onended fired");
             URL.revokeObjectURL(audioUrl);
-            handleFinished();
+            handleFinished("html5-ended");
           };
 
-          audio.onerror = () => {
+          audio.onerror = (e) => {
+            console.warn("[VoiceBot] HTML5 audio error:", e);
             URL.revokeObjectURL(audioUrl);
-            fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
+            fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
           };
 
           const playPromise = audio.play();
           if (playPromise !== undefined) {
-            playPromise.catch((playErr) => {
+            playPromise.then(() => {
+              console.log("[VoiceBot] HTML5 audio playPromise resolved!");
+            }).catch((playErr) => {
               console.warn("HTML5 audio playback blocked by autoplay policy:", playErr);
-              setPendingPlayFn(() => () => {
-                audio.play().catch(() => {});
+              setPendingVoiceAudio({
+                play: () => {
+                  void audio.play().catch(() => {});
+                },
+                text: cleanText,
               });
-              handleFinished();
+              handleFinished("html5-blocked");
             });
           }
           return;
         } catch (playErr) {
           console.warn("HTML5 audio setup error:", playErr);
-          fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
+          fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
           return;
         }
       } catch (err) {
         console.warn("Server TTS fetch failed, using browser synthesis fallback:", err);
-        fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
+        fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
       }
     },
     [fallbackSpeechSynthesis, playJarvisChirp, stopAllPlayback, stopListening, unlockAudioSystems, updateStatus]
@@ -995,6 +1039,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
     }
 
+    const granted = await ensureMicrophoneAccess();
+    if (!granted) {
+      setDialogue({
+        agent: "Microphone access was denied or is unavailable. Please type your directive below.",
+        provider: "MIC PERMISSION REQUIRED",
+      });
+      updateStatus("idle");
+      return;
+    }
+
     consecutiveNetworkErrorsRef.current = 0;
     accumulatedFinalTranscriptRef.current = "";
     latestInterimTranscriptRef.current = "";
@@ -1014,7 +1068,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       user: "Listening... Speak your directive aloud",
       provider: "VOICE DIRECTIVE READY",
     });
-  }, [stopAllPlayback, unlockAudioSystems, updateStatus]);
+  }, [ensureMicrophoneAccess, stopAllPlayback, unlockAudioSystems, updateStatus]);
 
   const INTRO_STATEMENT =
     "Greetings. ULTRON systems online. All cognitive networks and voice interfaces are operational. How may I assist you today?";
@@ -1078,8 +1132,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   playIntroductoryStatementRef.current = playIntroductoryStatement;
 
   const toggleMic = useCallback(async () => {
-    unlockAudioSystems();
+    await unlockAudioSystems();
     if (!isMicEnabledRef.current) {
+      const granted = await ensureMicrophoneAccess();
+      if (!granted) {
+        setDialogue({
+          agent: "Microphone access was denied or is unavailable. You can type directives below.",
+          provider: "MIC PERMISSION REQUIRED",
+        });
+        return;
+      }
       consecutiveNetworkErrorsRef.current = 0;
       setIsMicEnabled(true);
       isMicEnabledRef.current = true;
@@ -1099,10 +1161,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         provider: "MICROPHONE MUTED",
       }));
     }
-  }, [startListening, stopListening, unlockAudioSystems, updateStatus]);
+  }, [ensureMicrophoneAccess, startListening, stopListening, unlockAudioSystems, updateStatus]);
 
   const toggleVoiceMute = useCallback(() => {
-    unlockAudioSystems();
+    void unlockAudioSystems();
     setIsVoiceMuted((prev) => {
       const next = !prev;
       isVoiceMutedRef.current = next;
@@ -1113,8 +1175,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     });
   }, [stopAllPlayback, unlockAudioSystems]);
 
-  const handleTestVoice = useCallback(() => {
-    unlockAudioSystems();
+  const handleTestVoice = useCallback(async () => {
+    hasPlayedIntroRef.current = true;
+    setHasIntroPlayed(true);
+    setNeedsInteraction(false);
+    await unlockAudioSystems();
 
     if (isSpeakingRef.current) {
       stopAllPlayback();
@@ -1132,11 +1197,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     void speakReplyRef.current(testPhrase);
   }, [selectedVoice, stopAllPlayback, unlockAudioSystems, updateStatus]);
 
-  const handleSelectVoice = useCallback((personaId: VoicePersona) => {
+  const handleSelectVoice = useCallback(async (personaId: VoicePersona) => {
+    hasPlayedIntroRef.current = true;
+    setHasIntroPlayed(true);
+    setNeedsInteraction(false);
     setSelectedVoice(personaId);
     selectedVoiceRef.current = personaId;
     setIsVoiceMenuOpen(false);
-    unlockAudioSystems();
+    await unlockAudioSystems();
 
     const persona = VOICE_PERSONAS[personaId];
     const notifyPhrase = `Voice persona updated to ${persona.label}.`;
@@ -1147,7 +1215,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     void speakReplyRef.current(notifyPhrase, personaId);
   }, [unlockAudioSystems]);
 
-  const handleInputSubmit = (e: React.FormEvent) => {
+  const handleInputSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputValue.trim();
     if (!text) return;
@@ -1177,14 +1245,20 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     stopAllPlayback();
     isSpeakingRef.current = false;
 
-    unlockAudioSystems();
+    await unlockAudioSystems();
     void processUtteranceRef.current(text);
   };
 
-  // Passive gesture listener ONLY unlocks audio, NEVER hijacks user input
+  // Passive gesture listener unlocks audio and plays introductory statement on first interaction
   useEffect(() => {
-    const handleGesture = () => {
-      unlockAudioSystems();
+    const handleGesture = async () => {
+      await unlockAudioSystems();
+      if (!hasPlayedIntroRef.current) {
+        hasPlayedIntroRef.current = true;
+        setHasIntroPlayed(true);
+        setNeedsInteraction(false);
+        void playIntroductoryStatementRef.current(true);
+      }
     };
 
     window.addEventListener("pointerdown", handleGesture, { passive: true });
@@ -1205,9 +1279,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     const checkAutoplay = async () => {
       if (hasPlayedIntroRef.current) return;
 
-      const ctx = unlockAudioSystems();
+      const ctx = await unlockAudioSystems();
       if (ctx && ctx.state === "running") {
         setNeedsInteraction(false);
+        hasPlayedIntroRef.current = true;
+        setHasIntroPlayed(true);
+        void playIntroductoryStatementRef.current(true);
       } else {
         setNeedsInteraction(true);
       }
@@ -1320,11 +1397,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     // Fired immediately when speech begins
     recognition.onspeechstart = () => {
       if (!isMountedRef.current) return;
-      // If assistant was speaking, barge-in (stop assistant and listen to user)
-      if (isSpeakingRef.current) {
-        stopAllPlayback();
-        isSpeakingRef.current = false;
-        updateStatus("listening");
+      // Ignore room acoustics and speaker output while assistant is speaking or thinking
+      if (isSpeakingRef.current || isThinkingRef.current) {
+        return;
       }
       setIsUserSpeaking(true);
       isUserSpeakingRef.current = true;
@@ -1368,17 +1443,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     };
 
     recognition.onresult = (event: SpeechRecognitionEventItem) => {
-      if (!isMountedRef.current || isThinkingRef.current) {
+      if (!isMountedRef.current || isThinkingRef.current || isSpeakingRef.current) {
         return;
       }
       consecutiveNetworkErrorsRef.current = 0;
-
-      // If user starts speaking while assistant is speaking, barge-in immediately
-      if (isSpeakingRef.current) {
-        stopAllPlayback();
-        isSpeakingRef.current = false;
-        updateStatus("listening");
-      }
 
       let currentInterim = "";
       let newlyFinalized = "";
@@ -1445,10 +1513,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         setIsMicEnabled(false);
         isMicEnabledRef.current = false;
         updateStatus("idle");
-        setDialogue({
-          agent: "Microphone access is unavailable or denied. Please use keyboard directives below.",
-          provider: "MIC DISABLED · TEXT READY",
-        });
+        if (isVoiceReplyModeRef.current) {
+          setDialogue({
+            agent: "Microphone access is unavailable or denied. Please use keyboard directives below.",
+            provider: "MIC DISABLED · TEXT READY",
+          });
+        }
         return;
       }
       if (event.error === "network") {
@@ -1514,9 +1584,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       };
       window.speechSynthesis.getVoices();
     }
-
-    // Start initial listening
-    startListeningRef.current();
 
     return () => {
       isMountedRef.current = false;
@@ -2151,6 +2218,39 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           </button>
         )}
 
+        {/* Fallback button if browser autoplay blocked voice audio */}
+        {pendingVoiceAudio && (
+          <button
+            type="button"
+            onClick={async () => {
+              await unlockAudioSystems();
+              pendingVoiceAudio.play();
+              setPendingVoiceAudio(null);
+            }}
+            className="hud-btn voice-action-btn"
+            style={{
+              height: "38px",
+              padding: "0 16px",
+              fontSize: "12px",
+              letterSpacing: "0.1em",
+              borderRadius: "6px",
+              borderColor: "#ffaa30",
+              color: "#ffdd66",
+              background: "rgba(35, 15, 0, 0.95)",
+              boxShadow: "0 0 16px rgba(255, 170, 48, 0.5)",
+              animation: "pulse 1.5s infinite ease-in-out",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              width: "100%",
+            }}
+          >
+            <span>🔊 CLICK TO HEAR AGENT VOICE</span>
+          </button>
+        )}
+
         {/* Interactive Chat Form with Live Speech Autotyping */}
         <form
           onSubmit={handleInputSubmit}
@@ -2200,9 +2300,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 setInputValue(e.target.value);
                 inputValueRef.current = e.target.value;
               }}
-              onKeyDown={(e) => {
-                void unlockAudioSystems();
-                e.stopPropagation();
+              onKeyDown={async (e) => {
+                await unlockAudioSystems();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleInputSubmit(e);
+                }
               }}
               placeholder={
                 status === "thinking"
