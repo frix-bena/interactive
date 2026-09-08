@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
 import https from "node:https";
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 // In-memory audio cache for frequent phrases
 const audioCache = new Map<string, Buffer>();
@@ -153,7 +157,44 @@ async function generateOpenAITTS(apiKey: string, text: string, voiceName?: strin
   }
 }
 
-async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ buffer: Buffer; engine: string }> {
+function generateEspeakTTS(text: string, voiceOption = "jarvis"): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    let espeakVoice = "en-gb";
+    let pitch = "50";
+    let speed = "150";
+
+    const v = voiceOption.toLowerCase();
+    if (v === "friday") {
+      espeakVoice = "en-us+f3";
+      pitch = "62";
+      speed = "155";
+    } else if (v === "ultron") {
+      espeakVoice = "en-gb+m3";
+      pitch = "35";
+      speed = "138";
+    } else if (v === "jarvis") {
+      espeakVoice = "en-gb";
+      pitch = "50";
+      speed = "148";
+    }
+
+    const tmpFile = path.join(os.tmpdir(), `ultron_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.wav`);
+    execFile("espeak-ng", ["-w", tmpFile, "-v", espeakVoice, "-p", pitch, "-s", speed, text.slice(0, 800)], (err) => {
+      if (err) {
+        return resolve(null);
+      }
+      fs.readFile(tmpFile, (readErr, data) => {
+        fs.unlink(tmpFile, () => {});
+        if (readErr || !data || data.length === 0) {
+          return resolve(null);
+        }
+        resolve(data);
+      });
+    });
+  });
+}
+
+async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ buffer: Buffer; engine: string; contentType?: string }> {
   const clean = sanitizeForSpeech(text).slice(0, 1000);
   if (!clean) {
     throw new Error("Text is empty after sanitization.");
@@ -165,7 +206,7 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
   // Check cache
   const cached = audioCache.get(cacheKey);
   if (cached) {
-    return { buffer: cached, engine: "cache" };
+    return { buffer: cached, engine: "cache", contentType: "audio/mpeg" };
   }
 
   // 1. Try OpenAI TTS if configured
@@ -185,7 +226,7 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
         if (firstKey) audioCache.delete(firstKey);
       }
       audioCache.set(cacheKey, openAiBuffer);
-      return { buffer: openAiBuffer, engine: `openai-${openAiVoice}` };
+      return { buffer: openAiBuffer, engine: `openai-${openAiVoice}`, contentType: "audio/mpeg" };
     }
   }
 
@@ -199,17 +240,27 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
     googleLang = "en-gb";
   }
 
-  const chunks = splitIntoChunks(clean);
-  const chunkBuffers = await Promise.all(chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang)));
-  const combined = Buffer.concat(chunkBuffers);
+  try {
+    const chunks = splitIntoChunks(clean);
+    const chunkBuffers = await Promise.all(chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang)));
+    const combined = Buffer.concat(chunkBuffers);
 
-  if (audioCache.size >= MAX_CACHE_SIZE) {
-    const firstKey = audioCache.keys().next().value;
-    if (firstKey) audioCache.delete(firstKey);
+    if (audioCache.size >= MAX_CACHE_SIZE) {
+      const firstKey = audioCache.keys().next().value;
+      if (firstKey) audioCache.delete(firstKey);
+    }
+    audioCache.set(cacheKey, combined);
+
+    return { buffer: combined, engine: `google-${googleLang}`, contentType: "audio/mpeg" };
+  } catch (err) {
+    console.warn("Google TTS failed, attempting system espeak-ng fallback:", err);
+    // 3. Fallback to system espeak-ng if available
+    const espeakBuffer = await generateEspeakTTS(clean, vKey);
+    if (espeakBuffer) {
+      return { buffer: espeakBuffer, engine: `system-espeak-${vKey}`, contentType: "audio/wav" };
+    }
+    throw err;
   }
-  audioCache.set(cacheKey, combined);
-
-  return { buffer: combined, engine: `google-${googleLang}` };
 }
 
 export async function GET(request: Request) {
@@ -222,12 +273,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Query parameter 'text' is required" }, { status: 400 });
     }
 
-    const { buffer, engine } = await generateAudio(text, voice);
+    const { buffer, engine, contentType = "audio/mpeg" } = await generateAudio(text, voice);
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
       headers: {
-        "Content-Type": "audio/mpeg",
+        "Content-Type": contentType,
         "Content-Length": buffer.length.toString(),
         "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
         "X-TTS-Engine": engine,
@@ -249,12 +300,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Body property 'text' is required" }, { status: 400 });
     }
 
-    const { buffer, engine } = await generateAudio(text, voice);
+    const { buffer, engine, contentType = "audio/mpeg" } = await generateAudio(text, voice);
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
       headers: {
-        "Content-Type": "audio/mpeg",
+        "Content-Type": contentType,
         "Content-Length": buffer.length.toString(),
         "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
         "X-TTS-Engine": engine,

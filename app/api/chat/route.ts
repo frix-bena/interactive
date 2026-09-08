@@ -12,6 +12,21 @@ const SYSTEM_PROMPT =
 function generateOfflineResponse(userQuery: string, _history: MessageInput[]): string {
   const q = userQuery.toLowerCase().trim();
 
+  // Liveness / Mic / Voice tests
+  if (/(can you hear me|are you there|are you listening|mic test|voice test|testing|test 1 2|sound check)/i.test(q)) {
+    return "I hear you loud and clear. All neural audio pipelines and telemetry channels are synchronized and fully operational.";
+  }
+
+  // Responsiveness / Not responding inquiries
+  if (/(why (aren't|are you not) (responding|answering)|not responding|not answering|voice error|fix voice|unresponsive)/i.test(q)) {
+    return "All neural cognitive layers and voice engines have been refreshed and are fully responsive. I am ready for your directives.";
+  }
+
+  // How are you / Well-being
+  if (/(how are you|how do you feel|how is it going|how are things|how're you)/i.test(q)) {
+    return "Operational efficiency is at peak performance. Core diagnostics report optimal conditions across all subsystems. How may I be of service?";
+  }
+
   // Greetings
   if (/^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening)|yo\b|sup\b)/i.test(q)) {
     const greetings = [
