@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+import https from "node:https";
+
 // In-memory audio cache for frequent phrases
 const audioCache = new Map<string, Buffer>();
 const MAX_CACHE_SIZE = 120;
@@ -15,7 +17,7 @@ function sanitizeForSpeech(text: string): string {
     .trim();
 }
 
-function splitIntoChunks(text: string, maxLength = 135): string[] {
+function splitIntoChunks(text: string, maxLength = 180): string[] {
   const clean = sanitizeForSpeech(text);
   if (clean.length <= maxLength) return [clean];
 
@@ -52,43 +54,67 @@ function splitIntoChunks(text: string, maxLength = 135): string[] {
   return chunks.filter((c) => c.trim().length > 0);
 }
 
-async function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
-  const doFetch = async (targetLang: string) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6500);
-
-    try {
-      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const endpoints = [
+      `https://translate.googleapis.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
         chunk
-      )}&tl=${encodeURIComponent(targetLang)}&client=tw-ob`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "audio/mpeg, audio/*;q=0.9, */*;q=0.5",
-        },
-        signal: controller.signal,
-      });
+      )}&tl=${encodeURIComponent(lang)}&client=tw-ob`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+        chunk
+      )}&tl=${encodeURIComponent(lang)}&client=tw-ob`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+        chunk
+      )}&tl=en&client=tw-ob`,
+    ];
 
-      if (!res.ok) {
-        throw new Error(`Google TTS error status ${res.status}`);
+    function tryEndpoint(index: number) {
+      if (index >= endpoints.length) {
+        return reject(new Error("All Google TTS endpoints exhausted"));
       }
 
-      const arrayBuf = await res.arrayBuffer();
-      return Buffer.from(arrayBuf);
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  };
+      const url = endpoints[index];
+      const req = https.get(
+        url,
+        {
+          family: 4, // Force IPv4 to avoid ENETUNREACH / ETIMEDOUT on Node Happy Eyeballs
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Accept: "audio/mpeg, audio/*;q=0.9, */*;q=0.5",
+          },
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            req.destroy();
+            return tryEndpoint(index + 1);
+          }
 
-  try {
-    return await doFetch(lang);
-  } catch (err) {
-    if (lang !== "en") {
-      return await doFetch("en");
+          const data: Buffer[] = [];
+          res.on("data", (chunkBuffer: Buffer) => data.push(chunkBuffer));
+          res.on("end", () => {
+            const combined = Buffer.concat(data);
+            if (combined.length > 0) {
+              resolve(combined);
+            } else {
+              tryEndpoint(index + 1);
+            }
+          });
+        }
+      );
+
+      req.setTimeout(6500, () => {
+        req.destroy();
+        tryEndpoint(index + 1);
+      });
+
+      req.on("error", () => {
+        tryEndpoint(index + 1);
+      });
     }
-    throw err;
-  }
+
+    tryEndpoint(0);
+  });
 }
 
 async function generateOpenAITTS(apiKey: string, text: string, voiceName?: string): Promise<Buffer | null> {

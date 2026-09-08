@@ -102,7 +102,6 @@ interface VoiceBotProps {
 
 export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [status, setStatus] = useState<AgentState>("listening");
-  const [needsGesture, setNeedsGesture] = useState<boolean>(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState<boolean>(false);
   const [isVoiceReplyMode, setIsVoiceReplyMode] = useState<boolean>(false);
   const [liveUserTranscript, setLiveUserTranscript] = useState<string>("");
@@ -114,7 +113,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState<boolean>(false);
   const [dialogue, setDialogue] = useState<{ user?: string; agent?: string; provider?: string } | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
-  const [audioBlockedNotice, setAudioBlockedNotice] = useState<boolean>(false);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isMountedRef = useRef<boolean>(true);
@@ -125,7 +123,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isMicEnabledRef = useRef<boolean>(true);
   const isVoiceMutedRef = useRef<boolean>(false);
   const selectedVoiceRef = useRef<VoicePersona>("jarvis");
-  const needsGestureRef = useRef<boolean>(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -138,7 +135,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
   const typewriterIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const pendingAudioRef = useRef<{ text: string; persona: VoicePersona } | null>(null);
 
   messagesRef.current = messages;
   isMicEnabledRef.current = isMicEnabled;
@@ -190,7 +186,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Unlock Web Audio & browser audio elements on user interaction.
    * A running AudioContext permanently bypasses async autoplay restrictions.
    */
-  const unlockAudioSystems = useCallback(async (): Promise<AudioContext | null> => {
+  const unlockAudioSystems = useCallback((): AudioContext | null => {
     if (typeof window === "undefined") return null;
 
     let ctx = audioContextRef.current;
@@ -208,14 +204,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (ctx && ctx.state === "suspended") {
       try {
-        await Promise.race([
-          ctx.resume().catch(() => {}),
-          new Promise((resolve) => setTimeout(resolve, 150)),
-        ]);
+        ctx.resume().catch(() => {});
       } catch {}
     }
 
-    // Play a microscopic silent buffer to guarantee the context is marked as user-unlocked
     if (ctx && ctx.state === "running") {
       try {
         const silentBuf = ctx.createBuffer(1, 1, 22050);
@@ -224,19 +216,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         silentSrc.connect(ctx.destination);
         silentSrc.start(0);
       } catch {}
-      setNeedsGesture(false);
-      needsGestureRef.current = false;
-      setAudioBlockedNotice(false);
     }
 
-    // Prepare HTML5 Audio element once without constantly replacing active src
+    // Prepare HTML5 Audio element once
     if (!audioElementRef.current) {
       try {
-        const silentAudio = new Audio(
-          "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"
-        );
+        const silentAudio = new Audio();
         audioElementRef.current = silentAudio;
-        void silentAudio.play().catch(() => {});
       } catch {}
     }
 
@@ -266,19 +252,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     try {
       recognition.start();
-      setNeedsGesture(false);
-      needsGestureRef.current = false;
       updateStatus("listening");
-    } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "InvalidStateError") {
-        return;
-      }
-      if (err instanceof Error && (err.name === "InvalidStateError" || err.message?.includes("already started"))) {
-        return;
-      }
-      console.warn("Speech recognition start requires user gesture:", err);
-      setNeedsGesture(true);
-      needsGestureRef.current = true;
+    } catch {
+      // Ignored: browser may already have active session or requires user interaction
     }
   }, [updateStatus]);
 
@@ -321,10 +297,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
 
       try {
-        window.speechSynthesis.cancel();
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.cancel();
+        }
       } catch {}
 
-      // Short delay to avoid Chrome asynchronous cancel dropping the new utterance
       setTimeout(() => {
         if (!isMountedRef.current || !isSpeakingRef.current) {
           onFinish();
@@ -344,7 +321,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             let preferredVoice: SpeechSynthesisVoice | undefined;
 
             if (persona === "jarvis") {
-              // British articulate AI
               preferredVoice =
                 voices.find(
                   (v) =>
@@ -355,7 +331,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               utterance.rate = 1.0;
               utterance.pitch = 0.98;
             } else if (persona === "ultron") {
-              // Deep cyborg
               preferredVoice =
                 voices.find(
                   (v) =>
@@ -365,7 +340,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               utterance.rate = 0.93;
               utterance.pitch = 0.82;
             } else if (persona === "friday") {
-              // Natural female AI
               preferredVoice =
                 voices.find(
                   (v) =>
@@ -385,37 +359,25 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             }
           }
 
-          utterance.onend = () => {
-            onFinish();
+          let finished = false;
+          const complete = () => {
+            if (!finished) {
+              finished = true;
+              onFinish();
+            }
           };
 
-          utterance.onerror = (e) => {
-            if (e.error !== "interrupted" && e.error !== "canceled") {
-              console.warn("Browser speech synthesis error:", e);
-            }
-            onFinish();
+          utterance.onend = complete;
+          utterance.onerror = () => {
+            complete();
           };
 
           activeUtteranceRef.current = utterance;
           window.speechSynthesis.speak(utterance);
-
-          // Workaround for Chrome speech synthesis pausing on longer utterances
-          const resumeInterval = setInterval(() => {
-            if (typeof window !== "undefined" && "speechSynthesis" in window) {
-              if (window.speechSynthesis.speaking) {
-                window.speechSynthesis.resume();
-              } else {
-                clearInterval(resumeInterval);
-              }
-            } else {
-              clearInterval(resumeInterval);
-            }
-          }, 2500);
-        } catch (e) {
-          console.warn("Speech synthesis invocation failed:", e);
+        } catch {
           onFinish();
         }
-      }, 50);
+      }, 60);
     },
     []
   );
@@ -457,7 +419,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       updateStatus("speaking");
 
       // Pre-unlock AudioContext if needed
-      const ctx = await unlockAudioSystems();
+      const ctx = unlockAudioSystems();
+      if (ctx && ctx.state === "suspended") {
+        try {
+          await ctx.resume();
+        } catch {}
+      }
       playJarvisChirp();
 
       const handleFinished = () => {
@@ -471,7 +438,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
         currentSourceNodeRef.current = null;
         activeUtteranceRef.current = null;
-        setAudioBlockedNotice(false);
 
         if (!isMountedRef.current) return;
         isSpeakingRef.current = false;
@@ -488,10 +454,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       };
 
       // Safety timer in case playback events are dropped
-      const estimatedDurationMs = Math.max(6000, (cleanText.length / 9) * 1000 + 4500);
+      const estimatedDurationMs = Math.max(8000, (cleanText.length / 8) * 1000 + 6000);
       ttsSafetyTimeoutRef.current = setTimeout(() => {
         if (isSpeakingRef.current) {
-          console.warn("Voice playback safety timeout reached, restoring state");
           handleFinished();
         }
       }, estimatedDurationMs);
@@ -502,7 +467,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      // 1. Primary: Server-Side TTS with Web Audio decoding (unrestricted autoplay once running)
+      // 1. Primary: Server-Side TTS with Web Audio decoding
       try {
         const response = await fetch("/api/tts", {
           method: "POST",
@@ -520,15 +485,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const arrayBuffer = await response.arrayBuffer();
         if (!isMountedRef.current || !isSpeakingRef.current) return;
 
-        let activeCtx = ctx;
-        if (activeCtx && activeCtx.state === "suspended") {
-          try {
-            await activeCtx.resume();
-          } catch {}
-        }
+        let activeCtx = audioContextRef.current || ctx;
+        if (activeCtx) {
+          if (activeCtx.state === "suspended") {
+            try {
+              await activeCtx.resume();
+            } catch {}
+          }
 
-        // Try playing via Web Audio API ONLY IF the context is actively running
-        if (activeCtx && activeCtx.state === "running") {
           try {
             // Clone arrayBuffer before decodeAudioData so original buffer is not neutered if fallback is needed
             const bufferCopy = arrayBuffer.slice(0);
@@ -540,7 +504,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
             // Apply acoustic filter tailored to voice persona
             if (currentPersona === "ultron") {
-              // Deep cyborg bass resonance + subtle pitch shift
               const bassBoost = activeCtx.createBiquadFilter();
               bassBoost.type = "lowshelf";
               bassBoost.frequency.setValueAtTime(320, activeCtx.currentTime);
@@ -550,7 +513,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               source.connect(bassBoost);
               bassBoost.connect(activeCtx.destination);
             } else if (currentPersona === "jarvis") {
-              // High-clarity articulate presence
               const presence = activeCtx.createBiquadFilter();
               presence.type = "peaking";
               presence.frequency.setValueAtTime(2900, activeCtx.currentTime);
@@ -569,7 +531,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             };
 
             source.start(0);
-            setAudioBlockedNotice(false);
             return;
           } catch (webAudioErr) {
             console.warn("Web Audio buffer decoding failed, trying HTML5 Audio:", webAudioErr);
@@ -580,9 +541,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         try {
           const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
           const audioUrl = URL.createObjectURL(blob);
-          const audio = new Audio(audioUrl);
+          let audio = audioElementRef.current;
+          if (!audio) {
+            audio = new Audio();
+            audioElementRef.current = audio;
+          }
+          audio.src = audioUrl;
           audio.volume = 1.0;
-          audioElementRef.current = audio;
 
           audio.onended = () => {
             URL.revokeObjectURL(audioUrl);
@@ -595,17 +560,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           };
 
           await audio.play();
-          setAudioBlockedNotice(false);
           return;
         } catch (playErr) {
-          console.warn("HTML5 audio element playback restricted by browser policy:", playErr);
-          pendingAudioRef.current = { text: cleanText, persona: currentPersona };
-          setAudioBlockedNotice(true);
           fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
           return;
         }
       } catch (err) {
-        console.warn("Network TTS failed, falling back to Web Speech Synthesis:", err);
         fallbackSpeechSynthesis(cleanText, currentPersona, handleFinished);
       }
     },
@@ -901,25 +861,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Activated when user clicks the "ACTIVATE VOICE INTERFACE" button
    */
   const handleActivateVoice = useCallback(async () => {
-    setNeedsGesture(false);
-    needsGestureRef.current = false;
-    setAudioBlockedNotice(false);
-
-    // Unlock Web Audio & persistent audio
-    await unlockAudioSystems();
+    unlockAudioSystems();
 
     // Request microphone permission on user click
     if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach((track) => track.stop());
-      } catch (err) {
-        console.warn("Microphone access request:", err);
-      }
+      } catch {}
     }
 
     setIsMicEnabled(true);
     isMicEnabledRef.current = true;
+    startListening();
 
     // Speak immediate welcoming vocal confirmation
     const welcomeText = "ULTRON voice interface online. Systems synchronized and standing by.";
@@ -928,72 +882,46 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       provider: "VOICE ONLINE",
     });
     void speakReply(welcomeText);
-  }, [speakReply, unlockAudioSystems]);
+  }, [speakReply, startListening, unlockAudioSystems]);
 
   const toggleMic = useCallback(async () => {
-    await unlockAudioSystems();
-    if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-      } catch {}
-    }
-    setIsMicEnabled((prev) => {
-      const next = !prev;
-      isMicEnabledRef.current = next;
-      if (next) {
-        startListening();
-      } else {
-        stopListening();
-        updateStatus("idle");
+    unlockAudioSystems();
+    if (!isMicEnabledRef.current) {
+      if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((track) => track.stop());
+        } catch {}
       }
-      return next;
-    });
+      setIsMicEnabled(true);
+      isMicEnabledRef.current = true;
+      startListening();
+      updateStatus("listening");
+    } else {
+      setIsMicEnabled(false);
+      isMicEnabledRef.current = false;
+      stopListening();
+      updateStatus("idle");
+    }
   }, [startListening, stopListening, unlockAudioSystems, updateStatus]);
 
   const toggleVoiceMute = useCallback(() => {
-    void unlockAudioSystems();
+    unlockAudioSystems();
     setIsVoiceMuted((prev) => {
       const next = !prev;
       isVoiceMutedRef.current = next;
       if (next) {
-        if (currentSourceNodeRef.current) {
-          try {
-            currentSourceNodeRef.current.stop();
-          } catch {}
-          currentSourceNodeRef.current = null;
-        }
-        if (audioElementRef.current) {
-          audioElementRef.current.pause();
-        }
-        if (typeof window !== "undefined" && "speechSynthesis" in window) {
-          try {
-            window.speechSynthesis.cancel();
-          } catch {}
-        }
+        stopAllPlayback();
       }
       return next;
     });
-  }, [unlockAudioSystems]);
+  }, [stopAllPlayback, unlockAudioSystems]);
 
   const handleTestVoice = useCallback(() => {
-    void unlockAudioSystems();
+    unlockAudioSystems();
 
     if (isSpeakingRef.current) {
-      if (currentSourceNodeRef.current) {
-        try {
-          currentSourceNodeRef.current.stop();
-        } catch {}
-        currentSourceNodeRef.current = null;
-      }
-      if (audioElementRef.current) {
-        audioElementRef.current.pause();
-      }
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        try {
-          window.speechSynthesis.cancel();
-        } catch {}
-      }
+      stopAllPlayback();
       isSpeakingRef.current = false;
       updateStatus(isMicEnabledRef.current ? "listening" : "idle");
       return;
@@ -1006,29 +934,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       provider: `TEST · ${persona.label}`,
     });
     void speakReply(testPhrase);
-  }, [selectedVoice, speakReply, unlockAudioSystems, updateStatus]);
-
-  /**
-   * Play any pending agent speech response that was blocked by browser autoplay policy
-   */
-  const handlePlayPendingAudio = useCallback(async () => {
-    await unlockAudioSystems();
-    setAudioBlockedNotice(false);
-
-    if (pendingAudioRef.current?.text) {
-      const { text, persona } = pendingAudioRef.current;
-      pendingAudioRef.current = null;
-      void speakReply(text, persona);
-    } else {
-      void handleTestVoice();
-    }
-  }, [handleTestVoice, speakReply, unlockAudioSystems]);
+  }, [selectedVoice, speakReply, stopAllPlayback, unlockAudioSystems, updateStatus]);
 
   const handleSelectVoice = useCallback((personaId: VoicePersona) => {
     setSelectedVoice(personaId);
     selectedVoiceRef.current = personaId;
     setIsVoiceMenuOpen(false);
-    void unlockAudioSystems();
+    unlockAudioSystems();
 
     const persona = VOICE_PERSONAS[personaId];
     const notifyPhrase = `Voice persona updated to ${persona.label}.`;
@@ -1058,28 +970,26 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     setLiveUserTranscript("");
 
     // Unlock audio context synchronously during form submission gesture
-    void unlockAudioSystems();
-    setNeedsGesture(false);
-    needsGestureRef.current = false;
+    unlockAudioSystems();
     void processUtterance(text);
   };
 
   // Listen for user gestures anywhere on document to ensure audio context is active
   useEffect(() => {
     const handleGesture = () => {
-      void unlockAudioSystems();
-      setNeedsGesture(false);
-      needsGestureRef.current = false;
+      unlockAudioSystems();
     };
 
     window.addEventListener("pointerdown", handleGesture, { passive: true });
     window.addEventListener("keydown", handleGesture, { passive: true });
     window.addEventListener("touchstart", handleGesture, { passive: true });
+    window.addEventListener("click", handleGesture, { passive: true });
 
     return () => {
       window.removeEventListener("pointerdown", handleGesture);
       window.removeEventListener("keydown", handleGesture);
       window.removeEventListener("touchstart", handleGesture);
+      window.removeEventListener("click", handleGesture);
     };
   }, [unlockAudioSystems]);
 
@@ -1154,27 +1064,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     if (typeof window === "undefined") return;
 
-    // Detect if browser requires user gesture for audio context
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (AudioCtx) {
-      try {
-        const probeCtx = new AudioCtx();
-        if (probeCtx.state === "suspended") {
-          setNeedsGesture(true);
-          needsGestureRef.current = true;
-        }
-        void probeCtx.close().catch(() => {});
-      } catch {}
-    }
-
     const SpeechRecConstructor =
       (window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition;
 
     if (!SpeechRecConstructor) {
-      updateStatus("unsupported");
+      updateStatus("idle");
       return;
     }
 
@@ -1252,9 +1147,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       if (event.error === "no-speech" || event.error === "aborted") {
         return;
       }
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setNeedsGesture(true);
-        needsGestureRef.current = true;
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed" ||
+        event.error === "audio-capture"
+      ) {
+        setIsMicEnabled(false);
+        isMicEnabledRef.current = false;
+        updateStatus("idle");
+        return;
+      }
+      if (event.error === "network") {
+        updateStatus("idle");
+        return;
       }
     };
 
@@ -1275,8 +1180,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       if (
         isMicEnabledRef.current &&
         !isSpeakingRef.current &&
-        !isThinkingRef.current &&
-        !needsGestureRef.current
+        !isThinkingRef.current
       ) {
         if (restartTimeoutRef.current) {
           clearTimeout(restartTimeoutRef.current);
@@ -1286,12 +1190,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             isMountedRef.current &&
             isMicEnabledRef.current &&
             !isSpeakingRef.current &&
-            !isThinkingRef.current &&
-            !needsGestureRef.current
+            !isThinkingRef.current
           ) {
             startListening();
           }
-        }, 250);
+        }, 300);
       }
     };
 
@@ -1350,50 +1253,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           zIndex: 25,
         }}
       >
-        {/* Browser Audio Unlock Alert Button if Autoplay was flagged */}
-        {audioBlockedNotice && (
-          <button
-            type="button"
-            onClick={() => {
-              void handlePlayPendingAudio();
-            }}
-            className="hud-btn"
-            style={{
-              height: "auto",
-              padding: "8px 16px",
-              fontSize: "11px",
-              letterSpacing: "0.1em",
-              color: "#ffdd66",
-              borderColor: "#ffaa30",
-              animation: "pulse 1.5s infinite ease-in-out",
-              boxShadow: "0 0 14px rgba(255, 170, 48, 0.4)",
-            }}
-          >
-            🔊 UNMUTE AGENT VOICE OUTPUT
-          </button>
-        )}
-
-        {/* Activation Prompt if Gesture Required */}
-        {needsGesture && (
-          <button
-            type="button"
-            onClick={handleActivateVoice}
-            className="hud-btn"
-            style={{
-              height: "auto",
-              padding: "9px 18px",
-              fontSize: "12px",
-              letterSpacing: "0.12em",
-              animation: "pulse 2s infinite ease-in-out",
-              color: "#ffcc66",
-              borderColor: "#ffaa30",
-              boxShadow: "0 0 16px rgba(255, 170, 48, 0.5)",
-            }}
-          >
-            🎙️ ACTIVATE VOICE INTERFACE
-          </button>
-        )}
-
         <div style={{ display: "flex", gap: "8px", alignItems: "center", position: "relative" }}>
             {/* Voice Persona Selector */}
             <div style={{ position: "relative" }}>
@@ -1777,27 +1636,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 )}
               </div>
             )}
-            {audioBlockedNotice && (
-              <button
-                type="button"
-                onClick={() => {
-                  void handlePlayPendingAudio();
-                }}
-                className="hud-btn"
-                style={{
-                  alignSelf: "flex-start",
-                  padding: "6px 14px",
-                  fontSize: "11px",
-                  color: "#ffdd66",
-                  borderColor: "#ffaa30",
-                  animation: "pulse 1.5s infinite ease-in-out",
-                  boxShadow: "0 0 12px rgba(255, 170, 48, 0.4)",
-                  marginTop: "4px",
-                }}
-              >
-                🔊 CLICK TO PLAY AGENT VOICE
-              </button>
-            )}
             {dialogue.provider && (
               <div
                 style={{
@@ -1914,30 +1752,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           gap: "8px",
         }}
       >
-        {/* Activation Prompt if Gesture Required */}
-        {needsGesture && (
-          <button
-            type="button"
-            onClick={handleActivateVoice}
-            className="hud-btn voice-action-btn"
-            style={{
-              padding: "10px 18px",
-              fontSize: "12px",
-              letterSpacing: "0.12em",
-              borderRadius: "6px",
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              animation: "pulse 1.8s infinite ease-in-out",
-              boxShadow: "0 0 18px rgba(255, 170, 48, 0.4)",
-            }}
-          >
-            <span>🎙️ ACTIVATE ULTRON VOICE AGENT (CLICK TO ENABLE MIC &amp; AUDIO)</span>
-          </button>
-        )}
-
         {/* If Assistant is speaking: prominent Stop & Reply by Voice banner */}
         {status === "speaking" && (
           <button
