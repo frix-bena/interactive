@@ -113,6 +113,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState<boolean>(false);
   const [dialogue, setDialogue] = useState<{ user?: string; agent?: string; provider?: string } | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
+  const [hasIntroPlayed, setHasIntroPlayed] = useState<boolean>(false);
+  const [needsInteraction, setNeedsInteraction] = useState<boolean>(false);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isMountedRef = useRef<boolean>(true);
@@ -124,6 +126,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isVoiceMutedRef = useRef<boolean>(false);
   const selectedVoiceRef = useRef<VoicePersona>("jarvis");
   const messagesRef = useRef<ChatMessage[]>([]);
+  const hasPlayedIntroRef = useRef<boolean>(false);
   const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const accumulatedFinalTranscriptRef = useRef<string>("");
@@ -857,32 +860,84 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     });
   }, [startListening, stopAllPlayback, unlockAudioSystems, updateStatus]);
 
+  const INTRO_STATEMENT =
+    "Greetings. ULTRON systems online. All cognitive networks and voice interfaces are operational. How may I assist you today?";
+
   /**
-   * Activated when user clicks the "ACTIVATE VOICE INTERFACE" button
+   * Delivers the introductory statement via speech synthesis and typewriter dialogue
+   * once the user has opened the agent.
    */
+  const playIntroductoryStatement = useCallback(
+    async (force = false) => {
+      if (hasPlayedIntroRef.current && !force) return;
+      hasPlayedIntroRef.current = true;
+      setHasIntroPlayed(true);
+      setNeedsInteraction(false);
+
+      await unlockAudioSystems();
+
+      // Request microphone permission if not already granted so voice interaction is seamless
+      if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((track) => track.stop());
+        } catch {}
+      }
+
+      // Add introductory statement to chat history so it appears in telemetry log
+      const introMsg: ChatMessage = { role: "assistant", content: INTRO_STATEMENT };
+      setMessages((prev) => [...prev, introMsg]);
+      messagesRef.current = [...messagesRef.current, introMsg];
+
+      // Synchronized typewriter effect for introductory statement
+      if (typewriterIntervalRef.current) {
+        clearInterval(typewriterIntervalRef.current);
+        typewriterIntervalRef.current = null;
+      }
+
+      const persona = VOICE_PERSONAS[selectedVoiceRef.current] || VOICE_PERSONAS.jarvis;
+      setDialogue({
+        agent: "",
+        provider: `SYSTEM INITIALIZED · ${persona.label}`,
+      });
+
+      const charSpeedMs = 26;
+      let charIndex = 0;
+      typewriterIntervalRef.current = setInterval(() => {
+        if (!isMountedRef.current) {
+          if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
+          return;
+        }
+        charIndex += 1;
+        setDialogue({
+          agent: INTRO_STATEMENT.slice(0, charIndex),
+          provider: `SYSTEM INITIALIZED · ${persona.label}`,
+        });
+
+        if (charIndex >= INTRO_STATEMENT.length) {
+          if (typewriterIntervalRef.current) {
+            clearInterval(typewriterIntervalRef.current);
+            typewriterIntervalRef.current = null;
+          }
+        }
+      }, charSpeedMs);
+
+      // Speak introductory statement through voice
+      await speakReply(INTRO_STATEMENT);
+
+      // Auto-fade dialogue after 20 seconds of inactivity
+      dialogueTimerRef.current = setTimeout(() => {
+        if (isMountedRef.current && !isSpeakingRef.current && !isThinkingRef.current) {
+          setDialogue(null);
+        }
+      }, 20000);
+    },
+    [speakReply, unlockAudioSystems]
+  );
+
   const handleActivateVoice = useCallback(async () => {
-    unlockAudioSystems();
-
-    // Request microphone permission on user click
-    if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-      } catch {}
-    }
-
-    setIsMicEnabled(true);
-    isMicEnabledRef.current = true;
-    startListening();
-
-    // Speak immediate welcoming vocal confirmation
-    const welcomeText = "ULTRON voice interface online. Systems synchronized and standing by.";
-    setDialogue({
-      agent: welcomeText,
-      provider: "VOICE ONLINE",
-    });
-    void speakReply(welcomeText);
-  }, [speakReply, startListening, unlockAudioSystems]);
+    await playIntroductoryStatement(true);
+  }, [playIntroductoryStatement]);
 
   const toggleMic = useCallback(async () => {
     unlockAudioSystems();
@@ -975,9 +1030,13 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   };
 
   // Listen for user gestures anywhere on document to ensure audio context is active
+  // and trigger introductory statement on first interaction if autoplay was restricted by browser policy
   useEffect(() => {
     const handleGesture = () => {
       unlockAudioSystems();
+      if (!hasPlayedIntroRef.current) {
+        void playIntroductoryStatement();
+      }
     };
 
     window.addEventListener("pointerdown", handleGesture, { passive: true });
@@ -991,7 +1050,41 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       window.removeEventListener("touchstart", handleGesture);
       window.removeEventListener("click", handleGesture);
     };
-  }, [unlockAudioSystems]);
+  }, [playIntroductoryStatement, unlockAudioSystems]);
+
+  // Attempt auto-intro once the agent is opened if browser allows autoplay
+  useEffect(() => {
+    let autoIntroTimer: NodeJS.Timeout | null = null;
+
+    const checkAutoplayAndIntroduce = async () => {
+      if (hasPlayedIntroRef.current) return;
+
+      const ctx = unlockAudioSystems();
+      if (ctx && ctx.state === "suspended") {
+        try {
+          await ctx.resume();
+        } catch {}
+      }
+
+      // If AudioContext is running directly, autoplay is permitted without prior gesture!
+      if (ctx && ctx.state === "running") {
+        autoIntroTimer = setTimeout(() => {
+          if (!hasPlayedIntroRef.current && isMountedRef.current) {
+            void playIntroductoryStatement();
+          }
+        }, 350);
+      } else {
+        // Autoplay requires user gesture; display prompt until user interacts
+        setNeedsInteraction(true);
+      }
+    };
+
+    void checkAutoplayAndIntroduce();
+
+    return () => {
+      if (autoIntroTimer) clearTimeout(autoIntroTimer);
+    };
+  }, [playIntroductoryStatement, unlockAudioSystems]);
 
   // Global Keyboard Shortcuts for Voice Controls
   useEffect(() => {
@@ -1053,11 +1146,17 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           void startVoiceReply();
         }
       }
+
+      // I or i: replay introductory statement
+      if (e.key === "i" || e.key === "I") {
+        e.preventDefault();
+        void playIntroductoryStatement(true);
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [cancelUserSpeaking, startVoiceReply, stopAssistantAndReplyVoice, stopUserSpeakingAndReply]);
+  }, [cancelUserSpeaking, playIntroductoryStatement, startVoiceReply, stopAssistantAndReplyVoice, stopUserSpeakingAndReply]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -1485,6 +1584,67 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             </div>
           </div>
         </div>
+
+      {/* Sci-Fi HUD Introductory Activation Prompt (displayed if browser restricted autoplay until first interaction) */}
+      {needsInteraction && !hasIntroPlayed && (
+        <div
+          className="hud"
+          style={{
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 35,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "14px",
+            textAlign: "center",
+            pointerEvents: "auto",
+          }}
+        >
+          <button
+            type="button"
+            onClick={async () => {
+              await unlockAudioSystems();
+              void playIntroductoryStatement(true);
+            }}
+            className="hud-btn voice-action-btn"
+            style={{
+              padding: "16px 32px",
+              height: "auto",
+              fontSize: "14px",
+              letterSpacing: "0.2em",
+              borderRadius: "8px",
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+              background: "rgba(25, 12, 0, 0.92)",
+              border: "1px solid #ffaa30",
+              color: "#ffdd66",
+              boxShadow: "0 0 32px rgba(255, 170, 48, 0.45), inset 0 0 20px rgba(255, 140, 20, 0.25)",
+              animation: "pulse 2s infinite ease-in-out",
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: "20px" }}>⚡</span>
+            <span>INITIALIZE ULTRON</span>
+          </button>
+          <div
+            style={{
+              fontSize: "11px",
+              letterSpacing: "0.15em",
+              color: "rgba(255, 200, 100, 0.85)",
+              textShadow: "0 0 8px rgba(255, 170, 48, 0.7)",
+              background: "rgba(10, 5, 0, 0.8)",
+              padding: "6px 16px",
+              borderRadius: "4px",
+              border: "1px solid rgba(255, 170, 48, 0.25)",
+            }}
+          >
+            CLICK ANYWHERE TO ENGAGE NEURAL VOICE INTERFACE
+          </div>
+        </div>
+      )}
 
       {/* Live Dialogue & Subtitles HUD Banner */}
       {dialogue && (
