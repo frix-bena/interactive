@@ -701,22 +701,42 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   let rafId = 0;
   let disposed = false;
   let currentAgentState: AgentState = "idle";
+  let orbRotationY = 0;
+  let previousTime = 0;
 
   function animate() {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+    const dt = Math.min(t - previousTime, 0.1);
+    previousTime = t;
 
     // Agent state modulation
     let agentSurge = 0;
+    let autoRotSpeed = 0.28;
     if (currentAgentState === "speaking") {
       agentSurge = 0.8 + Math.sin(t * 14) * 0.4;
+      autoRotSpeed = 0.38;
       innerCore.rotation.y -= 0.012;
       icoWire.rotation.y += 0.02;
     } else if (currentAgentState === "thinking") {
       agentSurge = 0.4 + Math.sin(t * 8) * 0.2;
+      autoRotSpeed = 0.32;
       innerCore.rotation.y -= 0.009;
     }
+
+    // Automatic Ultron circle 3D rotation (without user interference)
+    orbRotationY += autoRotSpeed * dt;
+    orbGroup.rotation.y = orbRotationY;
+    orbGroup.rotation.x = Math.sin(t * 0.35) * 0.10;
+    orbGroup.rotation.z = Math.cos(t * 0.28) * 0.06;
+
+    // Automatic Ultron circle zoom and unzoom (without user interference)
+    // Smooth sinusoidal breathing cycle between ~0.72x (unzoomed) and ~1.28x (zoomed in)
+    const zoomCycle = Math.sin(t * 0.55);
+    const autoScale = 1.0 + 0.28 * zoomCycle;
+    const voicePulse = currentAgentState === "speaking" ? Math.sin(t * 12) * 0.03 : 0;
+    orbGroup.scale.setScalar(autoScale + voicePulse);
 
     // Outer shell rotation
     outerShell.rotation.y += 0.0015;

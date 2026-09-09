@@ -127,6 +127,7 @@ export default function JarvisOrb({ agentState = "idle" }: JarvisOrbProps) {
 
       <div className="hud hud-hint">
         <div>
+          <span className="key">AUTO</span> spin &amp; zoom loop&nbsp;&nbsp;
           <span className="key">DRAG</span> spin&nbsp;&nbsp;
           <span className="key">SCROLL</span> zoom
         </div>
