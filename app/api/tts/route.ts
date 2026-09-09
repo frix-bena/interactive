@@ -7,8 +7,20 @@ import path from "node:path";
 import os from "node:os";
 
 // In-memory audio cache for frequent phrases
-const audioCache = new Map<string, Buffer>();
-const MAX_CACHE_SIZE = 120;
+interface CachedAudio {
+  buffer: Buffer;
+  engine: string;
+  contentType: string;
+}
+const audioCache = new Map<string, CachedAudio>();
+const MAX_CACHE_SIZE = 150;
+
+const googleHttpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 12,
+  family: 4,
+  timeout: 3000,
+});
 
 function sanitizeForSpeech(text: string): string {
   return text
@@ -82,6 +94,7 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
       const req = https.get(
         url,
         {
+          agent: googleHttpsAgent,
           family: 4, // Force IPv4 to avoid ENETUNREACH / ETIMEDOUT on Node Happy Eyeballs
           headers: {
             "User-Agent":
@@ -115,7 +128,7 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
         }
       );
 
-      req.setTimeout(5000, () => {
+      req.setTimeout(2500, () => {
         req.destroy();
         if (!settled) {
           settled = true;
@@ -220,7 +233,7 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
   // Check cache
   const cached = audioCache.get(cacheKey);
   if (cached) {
-    return { buffer: cached, engine: "cache", contentType: "audio/mpeg" };
+    return cached;
   }
 
   // 1. Try OpenAI TTS if configured
@@ -239,8 +252,9 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
         const firstKey = audioCache.keys().next().value;
         if (firstKey) audioCache.delete(firstKey);
       }
-      audioCache.set(cacheKey, openAiBuffer);
-      return { buffer: openAiBuffer, engine: `openai-${openAiVoice}`, contentType: "audio/mpeg" };
+      const item: CachedAudio = { buffer: openAiBuffer, engine: `openai-${openAiVoice}`, contentType: "audio/mpeg" };
+      audioCache.set(cacheKey, item);
+      return item;
     }
   }
 
@@ -265,16 +279,22 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
       const firstKey = audioCache.keys().next().value;
       if (firstKey) audioCache.delete(firstKey);
     }
-    audioCache.set(cacheKey, combined);
-
-    return { buffer: combined, engine: `google-${googleLang}`, contentType: "audio/mpeg" };
+    const item: CachedAudio = { buffer: combined, engine: `google-${googleLang}`, contentType: "audio/mpeg" };
+    audioCache.set(cacheKey, item);
+    return item;
   } catch (err) {
-    console.warn("Google TTS failed, attempting system espeak-ng fallback:", err);
+    console.warn("Google TTS failed, immediately falling back to system espeak-ng:", err);
     // 3. Fallback to system espeak-ng if available
     try {
       const espeakBuffer = await generateEspeakTTS(clean, vKey);
       if (espeakBuffer) {
-        return { buffer: espeakBuffer, engine: `system-espeak-${vKey}`, contentType: "audio/wav" };
+        const item: CachedAudio = { buffer: espeakBuffer, engine: `system-espeak-${vKey}`, contentType: "audio/wav" };
+        if (audioCache.size >= MAX_CACHE_SIZE) {
+          const firstKey = audioCache.keys().next().value;
+          if (firstKey) audioCache.delete(firstKey);
+        }
+        audioCache.set(cacheKey, item);
+        return item;
       }
     } catch (espeakErr) {
       console.warn("espeak-ng invocation error:", espeakErr);

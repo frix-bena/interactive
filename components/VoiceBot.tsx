@@ -530,7 +530,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
   /**
    * Main speech playback engine:
-   * Multi-stage resilient pipeline with Web Audio API, persistent HTML5 Audio, and SpeechSynthesis fallback.
+   * Multi-stage resilient pipeline with Web Audio API, boosted gain, persistent HTML5 Audio, and interactive unblock.
    */
   const speakReply = useCallback(
     async (text: string, voicePersonaOverride?: VoicePersona) => {
@@ -541,7 +541,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         .replace(/\s+/g, " ")
         .trim();
 
-      if (!cleanText) {
+      if (!cleanText || isVoiceMutedRef.current) {
         isSpeakingRef.current = false;
         isThinkingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
@@ -549,15 +549,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      if (isVoiceMutedRef.current) {
-        isSpeakingRef.current = false;
-        isThinkingRef.current = false;
-        updateStatus(isMicEnabledRef.current ? "listening" : "idle");
-        if (isMicEnabledRef.current) startListeningRef.current();
-        return;
-      }
-
-      console.log("[VoiceBot] speakReply called with:", cleanText.slice(0, 50), "persona:", currentPersona);
+      console.log("[VoiceBot] speakReply transmitting:", cleanText.slice(0, 60), "persona:", currentPersona);
 
       // Stop any existing speech / audio playback
       stopAllPlayback();
@@ -575,7 +567,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         try {
           await ctx.resume();
         } catch (e) {
-          console.warn("[VoiceBot] ctx.resume failed:", e);
+          console.warn("[VoiceBot] ctx.resume:", e);
         }
       }
       playJarvisChirp();
@@ -584,7 +576,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       const handleFinished = (reason = "normal") => {
         if (isFinished) return;
         isFinished = true;
-        console.log("[VoiceBot] handleFinished called, reason:", reason);
+        console.log("[VoiceBot] Voice reply completed, reason:", reason);
 
         if (ttsSafetyTimeoutRef.current) {
           clearTimeout(ttsSafetyTimeoutRef.current);
@@ -602,59 +594,62 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         isThinkingRef.current = false;
         updateStatus(isMicEnabledRef.current ? "listening" : "idle");
 
-        // Delay resuming listening by 400ms to avoid audio reverb picking up
+        // Delay resuming listening by 500ms to avoid audio reverb picking up from speakers
         if (isMicEnabledRef.current) {
           setTimeout(() => {
             if (isMountedRef.current && !isSpeakingRef.current && !isThinkingRef.current && isMicEnabledRef.current) {
               startListeningRef.current();
             }
-          }, 400);
+          }, 500);
         }
       };
 
-      // Generous safety timer so speech completes naturally without hanging forever
-      const estimatedDurationMs = Math.max(8000, Math.min(35000, (cleanText.length / 6) * 1000 + 5000));
-      ttsSafetyTimeoutRef.current = setTimeout(() => {
-        if (isSpeakingRef.current) {
-          console.warn("[VoiceBot] Voice playback safety timeout reached!");
-          handleFinished("safety-timeout");
-        }
-      }, estimatedDurationMs);
+      // 1. Primary: Fetch synthesized audio from server /api/tts
+      let arrayBuffer: ArrayBuffer | null = null;
+      let contentType = "audio/mpeg";
 
-      // If user selected native browser engine directly
-      if (currentPersona === "system") {
-        console.log("[VoiceBot] Using system persona speech synthesis");
-        fallbackSpeechSynthesis(cleanText, "system", () => handleFinished("speech-synthesis"));
-        return;
-      }
-
-      // 1. Primary: Server-Side TTS with Web Audio decoding
       try {
         const controller = new AbortController();
-        const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
+        const ttsFetchTimeout = setTimeout(() => controller.abort(), 10000);
 
-        console.log("[VoiceBot] Fetching /api/tts...");
+        const serverVoice = VOICE_PERSONAS[currentPersona]?.serverVoice || "jarvis";
         const response = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             text: cleanText,
-            voice: VOICE_PERSONAS[currentPersona].serverVoice,
+            voice: serverVoice,
           }),
           signal: controller.signal,
         });
         clearTimeout(ttsFetchTimeout);
 
-        if (!response.ok) {
-          throw new Error(`TTS server responded with ${response.status}`);
+        if (response.ok) {
+          contentType = response.headers.get("content-type") || "audio/mpeg";
+          arrayBuffer = await response.arrayBuffer();
         }
+      } catch (postErr) {
+        console.warn("[VoiceBot] POST /api/tts failed, trying GET fallback:", postErr);
+      }
 
-        const arrayBuffer = await response.arrayBuffer();
-        console.log("[VoiceBot] Fetched TTS buffer, bytes:", arrayBuffer.byteLength);
-        if (!isMountedRef.current || !isSpeakingRef.current) {
-          return;
+      // Secondary fetch attempt via GET
+      if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+        try {
+          const serverVoice = VOICE_PERSONAS[currentPersona]?.serverVoice || "jarvis";
+          const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
+          if (getRes.ok) {
+            contentType = getRes.headers.get("content-type") || "audio/mpeg";
+            arrayBuffer = await getRes.arrayBuffer();
+          }
+        } catch (getErr) {
+          console.warn("[VoiceBot] GET /api/tts failed:", getErr);
         }
+      }
 
+      if (!isMountedRef.current) return;
+
+      // Playback using downloaded audio
+      if (arrayBuffer && arrayBuffer.byteLength > 0) {
         let activeCtx = audioContextRef.current || ctx;
         if (activeCtx && activeCtx.state === "suspended") {
           try {
@@ -662,36 +657,35 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           } catch {}
         }
 
-        console.log("[VoiceBot] activeCtx state:", activeCtx?.state);
+        // Method A: Web Audio API with boosted audible gain and acoustic filter
         if (activeCtx && activeCtx.state === "running") {
           try {
             const bufferCopy = arrayBuffer.slice(0);
             const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
-            if (!isMountedRef.current || !isSpeakingRef.current) {
-              return;
-            }
+            if (!isMountedRef.current) return;
 
             const source = activeCtx.createBufferSource();
             source.buffer = audioBuffer;
 
+            // Boost gain to 1.35x for crystal clear, audible output
             const gainNode = activeCtx.createGain();
-            gainNode.gain.setValueAtTime(1.0, activeCtx.currentTime);
+            gainNode.gain.setValueAtTime(1.35, activeCtx.currentTime);
 
-            // Apply acoustic filter tailored to voice persona
+            // Apply acoustic persona filter
             if (currentPersona === "ultron") {
               const bassBoost = activeCtx.createBiquadFilter();
               bassBoost.type = "lowshelf";
-              bassBoost.frequency.setValueAtTime(320, activeCtx.currentTime);
-              bassBoost.gain.setValueAtTime(4.5, activeCtx.currentTime);
+              bassBoost.frequency.setValueAtTime(280, activeCtx.currentTime);
+              bassBoost.gain.setValueAtTime(4.0, activeCtx.currentTime);
 
-              source.playbackRate.setValueAtTime(0.95, activeCtx.currentTime);
+              source.playbackRate.setValueAtTime(0.96, activeCtx.currentTime);
               source.connect(bassBoost);
               bassBoost.connect(gainNode);
             } else if (currentPersona === "jarvis") {
               const presence = activeCtx.createBiquadFilter();
               presence.type = "peaking";
-              presence.frequency.setValueAtTime(2800, activeCtx.currentTime);
-              presence.gain.setValueAtTime(2.2, activeCtx.currentTime);
+              presence.frequency.setValueAtTime(2600, activeCtx.currentTime);
+              presence.gain.setValueAtTime(2.0, activeCtx.currentTime);
 
               source.playbackRate.setValueAtTime(1.0, activeCtx.currentTime);
               source.connect(presence);
@@ -701,24 +695,27 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             }
 
             gainNode.connect(activeCtx.destination);
-
             currentSourceNodeRef.current = source;
+
+            // Precision duration-based safety timer
+            const actualDurationMs = Math.ceil(audioBuffer.duration * 1000) + 1200;
+            ttsSafetyTimeoutRef.current = setTimeout(() => {
+              handleFinished("webaudio-timeout");
+            }, actualDurationMs);
+
             source.onended = () => {
-              console.log("[VoiceBot] Web Audio source.onended fired");
               handleFinished("webaudio-ended");
             };
 
             source.start(0);
             return;
           } catch (webAudioErr) {
-            console.warn("Web Audio buffer decoding failed, trying HTML5 Audio:", webAudioErr);
+            console.warn("[VoiceBot] Web Audio buffer decoding failed, trying HTML5 Audio:", webAudioErr);
           }
         }
 
-        // 2. Secondary: Primed persistent HTML5 Audio Element playback
+        // Method B: Native HTML5 Audio playback via Blob URL
         try {
-          console.log("[VoiceBot] Falling back to primed HTML5 audio element...");
-          const contentType = response.headers.get("content-type") || "audio/mpeg";
           const blob = new Blob([arrayBuffer], { type: contentType });
           const audioUrl = URL.createObjectURL(blob);
           const audio = persistentAudioRef.current || new Audio();
@@ -727,7 +724,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           audio.volume = 1.0;
 
           audio.onended = () => {
-            console.log("[VoiceBot] HTML5 audio onended fired");
             URL.revokeObjectURL(audioUrl);
             handleFinished("html5-ended");
           };
@@ -742,24 +738,38 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           if (playPromise !== undefined) {
             playPromise
               .then(() => {
-                console.log("[VoiceBot] HTML5 audio playPromise resolved!");
+                console.log("[VoiceBot] HTML5 audio playing successfully");
+                const estMs = Math.max(6000, Math.ceil((cleanText.length / 5) * 1000) + 3000);
+                ttsSafetyTimeoutRef.current = setTimeout(() => handleFinished("html5-timeout"), estMs);
               })
               .catch((playErr) => {
-                console.warn("HTML5 audio playback blocked, immediately falling back to speech synthesis:", playErr);
-                URL.revokeObjectURL(audioUrl);
-                fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+                console.warn("[VoiceBot] HTML5 audio blocked by autoplay, presenting interactive unblock:", playErr);
+                setPendingVoiceAudio({
+                  play: () => {
+                    void audio.play().then(() => setPendingVoiceAudio(null)).catch(() => {});
+                  },
+                  text: cleanText,
+                });
+                // Attach universal one-time gesture listener on window
+                const unblockOnGesture = () => {
+                  void audio.play().then(() => setPendingVoiceAudio(null)).catch(() => {});
+                  window.removeEventListener("pointerdown", unblockOnGesture);
+                  window.removeEventListener("keydown", unblockOnGesture);
+                  window.removeEventListener("click", unblockOnGesture);
+                };
+                window.addEventListener("pointerdown", unblockOnGesture, { once: true });
+                window.addEventListener("keydown", unblockOnGesture, { once: true });
+                window.addEventListener("click", unblockOnGesture, { once: true });
               });
           }
           return;
         } catch (playErr) {
-          console.warn("HTML5 audio setup error, falling back to speech synthesis:", playErr);
-          fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
-          return;
+          console.warn("[VoiceBot] HTML5 audio setup error:", playErr);
         }
-      } catch (err) {
-        console.warn("Server TTS fetch failed, using browser synthesis fallback:", err);
-        fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
       }
+
+      // Method C: Browser SpeechSynthesis Fallback
+      fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
     },
     [fallbackSpeechSynthesis, playJarvisChirp, stopAllPlayback, stopListening, unlockAudioSystems, updateStatus]
   );
