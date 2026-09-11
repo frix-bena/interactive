@@ -144,7 +144,7 @@ export default function JarvisOrb({ agentState = "idle" }: JarvisOrbProps) {
           </div>
         )}
         <div>
-          <span className="key">V</span> voice reply&nbsp;&nbsp;
+          <span className="key">SPACE / V</span> voice chat&nbsp;&nbsp;
           <span className="key">I</span> intro briefing&nbsp;&nbsp;
           <span className="key">ESC</span> stop speaking
         </div>

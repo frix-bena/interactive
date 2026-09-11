@@ -49,7 +49,7 @@ function generateOfflineResponse(userQuery: string, _history: MessageInput[]): s
 
   // Capabilities / Help / Controls
   if (/(what can you do|help|capabilities|features|how do i|how to control|gestures|controls|instructions)/i.test(q)) {
-    return "You can speak or type to converse with me directly. To manipulate the holographic orb, activate gesture mode with G or the button, then pinch and drag with your hands to spin and zoom.";
+    return "You can speak to converse with me directly. To manipulate the holographic orb, activate gesture mode with G or the button, then pinch and drag with your hands to spin and zoom.";
   }
 
   // Iron Man / JARVIS / Tony Stark references
