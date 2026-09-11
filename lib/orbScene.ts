@@ -713,28 +713,45 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
 
     // Agent state modulation
     let agentSurge = 0;
-    let autoRotSpeed = 0.28;
+    let autoRotSpeed = 0.08;
     if (currentAgentState === "speaking") {
       agentSurge = 0.8 + Math.sin(t * 14) * 0.4;
-      autoRotSpeed = 0.38;
-      innerCore.rotation.y -= 0.012;
-      icoWire.rotation.y += 0.02;
+      autoRotSpeed = 0.13;
+      innerCore.rotation.y -= 0.006;
+      icoWire.rotation.y += 0.01;
     } else if (currentAgentState === "thinking") {
       agentSurge = 0.4 + Math.sin(t * 8) * 0.2;
-      autoRotSpeed = 0.32;
-      innerCore.rotation.y -= 0.009;
+      autoRotSpeed = 0.10;
+      innerCore.rotation.y -= 0.004;
     }
 
-    // Automatic Ultron circle 3D rotation (without user interference)
+    // Automatic Ultron circle 3D rotation at a lower rate (without user interference)
     orbRotationY += autoRotSpeed * dt;
     orbGroup.rotation.y = orbRotationY;
-    orbGroup.rotation.x = Math.sin(t * 0.35) * 0.10;
-    orbGroup.rotation.z = Math.cos(t * 0.28) * 0.06;
+    orbGroup.rotation.x = Math.sin(t * 0.18) * 0.06;
+    orbGroup.rotation.z = Math.cos(t * 0.14) * 0.04;
 
-    // Automatic Ultron circle zoom and unzoom (without user interference)
-    // Smooth sinusoidal breathing cycle between ~0.72x (unzoomed) and ~1.28x (zoomed in)
-    const zoomCycle = Math.sin(t * 0.55);
-    const autoScale = 1.0 + 0.28 * zoomCycle;
+    // Automatic Ultron circle zoom to maximum and unzoom to normal at a lower rate
+    // Smooth transition from normal (1.0x) to maximum (2.0x) over 8s, then unzooming to normal (1.0x) at a lower rate over 16s
+    const ZOOM_IN_DURATION = 8.0;
+    const UNZOOM_DURATION = 16.0;
+    const CYCLE_PERIOD = ZOOM_IN_DURATION + UNZOOM_DURATION;
+    const cycleTime = t % CYCLE_PERIOD;
+    let zoomProgress = 0; // 0 = normal (1.0), 1 = maximum (2.0)
+
+    if (cycleTime < ZOOM_IN_DURATION) {
+      // Zooming to maximum: smooth ease-in-out
+      const u = cycleTime / ZOOM_IN_DURATION;
+      zoomProgress = (1 - Math.cos(Math.PI * u)) / 2;
+    } else {
+      // Unzooming to normal at a lower rate: smooth ease-in-out
+      const u = (cycleTime - ZOOM_IN_DURATION) / UNZOOM_DURATION;
+      zoomProgress = (1 + Math.cos(Math.PI * u)) / 2;
+    }
+
+    const NORMAL_SCALE = 1.0;
+    const MAX_SCALE = 2.0;
+    const autoScale = NORMAL_SCALE + (MAX_SCALE - NORMAL_SCALE) * zoomProgress;
     const voicePulse = currentAgentState === "speaking" ? Math.sin(t * 12) * 0.03 : 0;
     orbGroup.scale.setScalar(autoScale + voicePulse);
 

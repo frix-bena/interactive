@@ -429,13 +429,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       updateStatus("speaking");
 
       try {
-        window.speechSynthesis.cancel();
         if (window.speechSynthesis.paused) {
           window.speechSynthesis.resume();
         }
       } catch {}
 
-      // Short 50ms buffer ensures asynchronous cancel() completes in Chromium before speak()
+      // Short 60ms delay ensures asynchronous queue is settled
       setTimeout(() => {
         if (!isMountedRef.current) {
           onFinish();
@@ -443,6 +442,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
 
         try {
+          // Cancel previous utterances safely
+          window.speechSynthesis.cancel();
+
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.volume = 1.0;
 
@@ -457,9 +459,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                     (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
                     /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
                 ) ||
-                voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB"));
+                voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) ||
+                voices.find((v) => v.lang.startsWith("en"));
               utterance.rate = 1.0;
               utterance.pitch = 0.98;
+              utterance.lang = "en-GB";
             } else if (persona === "ultron") {
               preferredVoice =
                 voices.find(
@@ -469,6 +473,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 ) || voices.find((v) => v.lang.startsWith("en"));
               utterance.rate = 0.93;
               utterance.pitch = 0.82;
+              utterance.lang = "en-GB";
             } else if (persona === "friday") {
               preferredVoice =
                 voices.find(
@@ -478,15 +483,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 ) || voices.find((v) => v.lang.startsWith("en"));
               utterance.rate = 1.03;
               utterance.pitch = 1.06;
+              utterance.lang = "en-US";
             } else {
               preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
               utterance.rate = 1.0;
               utterance.pitch = 1.0;
+              utterance.lang = "en-US";
             }
 
             if (preferredVoice) {
               utterance.voice = preferredVoice;
             }
+          } else {
+            utterance.lang = persona === "friday" ? "en-US" : "en-GB";
           }
 
           let finished = false;
@@ -503,9 +512,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           };
 
           utterance.onend = complete;
-          utterance.onerror = complete;
+          utterance.onerror = (err) => {
+            console.warn("[VoiceBot] SpeechSynthesis utterance error:", err);
+            complete();
+          };
 
-          // Chromium speech synthesis bug workaround: keep-alive resume every 5s
+          // Chromium speech synthesis bug workaround: keep-alive resume every 3s
           keepAliveTimer = setInterval(() => {
             if (typeof window !== "undefined" && "speechSynthesis" in window) {
               if (window.speechSynthesis.speaking && !finished) {
@@ -515,15 +527,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 if (keepAliveTimer) clearInterval(keepAliveTimer);
               }
             }
-          }, 5000);
+          }, 3000);
 
           (window as unknown as { __activeUtterance?: unknown }).__activeUtterance = utterance;
           activeUtteranceRef.current = utterance;
           window.speechSynthesis.speak(utterance);
-        } catch {
+        } catch (e) {
+          console.warn("[VoiceBot] fallbackSpeechSynthesis error:", e);
           onFinish();
         }
-      }, 50);
+      }, 60);
     },
     [updateStatus]
   );
@@ -604,13 +617,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
       };
 
+      // Persona: system -> use local browser speech synthesis directly
+      if (currentPersona === "system") {
+        fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("system-synth-ended"));
+        return;
+      }
+
       // 1. Primary: Fetch synthesized audio from server /api/tts
       let arrayBuffer: ArrayBuffer | null = null;
       let contentType = "audio/mpeg";
 
       try {
         const controller = new AbortController();
-        const ttsFetchTimeout = setTimeout(() => controller.abort(), 10000);
+        const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
 
         const serverVoice = VOICE_PERSONAS[currentPersona]?.serverVoice || "jarvis";
         const response = await fetch("/api/tts", {
@@ -743,28 +762,16 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
                 ttsSafetyTimeoutRef.current = setTimeout(() => handleFinished("html5-timeout"), estMs);
               })
               .catch((playErr) => {
-                console.warn("[VoiceBot] HTML5 audio blocked by autoplay, presenting interactive unblock:", playErr);
-                setPendingVoiceAudio({
-                  play: () => {
-                    void audio.play().then(() => setPendingVoiceAudio(null)).catch(() => {});
-                  },
-                  text: cleanText,
-                });
-                // Attach universal one-time gesture listener on window
-                const unblockOnGesture = () => {
-                  void audio.play().then(() => setPendingVoiceAudio(null)).catch(() => {});
-                  window.removeEventListener("pointerdown", unblockOnGesture);
-                  window.removeEventListener("keydown", unblockOnGesture);
-                  window.removeEventListener("click", unblockOnGesture);
-                };
-                window.addEventListener("pointerdown", unblockOnGesture, { once: true });
-                window.addEventListener("keydown", unblockOnGesture, { once: true });
-                window.addEventListener("click", unblockOnGesture, { once: true });
+                console.warn("[VoiceBot] HTML5 audio play blocked, immediately falling back to speech synthesis:", playErr);
+                URL.revokeObjectURL(audioUrl);
+                fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
               });
           }
           return;
         } catch (playErr) {
-          console.warn("[VoiceBot] HTML5 audio setup error:", playErr);
+          console.warn("[VoiceBot] HTML5 audio setup error, trying speech synthesis:", playErr);
+          fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+          return;
         }
       }
 
@@ -1086,8 +1093,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
       if (!SpeechRecConstructor) {
         setDialogue({
-          agent: "Speech recognition is not supported in this browser. Please type your directive below.",
-          provider: "BROWSER UNSUPPORTED",
+          agent: "Voice interface ready. You can type directives or use keyboard shortcuts (V / Space / Enter).",
+          provider: "VOICE SYSTEM READY",
         });
         updateStatus("idle");
         return;
@@ -1097,8 +1104,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     const granted = await ensureMicrophoneAccess();
     if (!granted) {
       setDialogue({
-        agent: "Microphone access was denied or is unavailable. Please type your directive below.",
-        provider: "MIC PERMISSION REQUIRED",
+        agent: "Microphone permission required for voice directives. You can type directives below.",
+        provider: "READY FOR DIRECTIVES",
       });
       updateStatus("idle");
       return;
@@ -1192,7 +1199,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       const granted = await ensureMicrophoneAccess();
       if (!granted) {
         setDialogue({
-          agent: "Microphone access was denied or is unavailable. You can type directives below.",
+          agent: "Microphone permission is required for voice directives. You can also type directives below.",
           provider: "MIC PERMISSION REQUIRED",
         });
         return;
@@ -1213,7 +1220,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       updateStatus("idle");
       setDialogue((prev) => ({
         ...prev,
-        provider: "MICROPHONE MUTED",
+        provider: "MICROPHONE STANDBY",
       }));
     }
   }, [ensureMicrophoneAccess, startListening, stopListening, unlockAudioSystems, updateStatus]);
@@ -1569,10 +1576,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         isMicEnabledRef.current = false;
         updateStatus("idle");
         if (isVoiceReplyModeRef.current) {
-          setDialogue({
-            agent: "Microphone access is unavailable or denied. Please use keyboard directives below.",
-            provider: "MIC DISABLED · TEXT READY",
-          });
+          setDialogue((prev) => ({
+            user: prev?.user,
+            agent: prev?.agent || "Microphone input standby. Click Voice Input or type directives below.",
+            provider: "READY",
+          }));
         }
         return;
       }
@@ -1582,10 +1590,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           setIsMicEnabled(false);
           isMicEnabledRef.current = false;
           updateStatus("idle");
-          setDialogue({
-            agent: "Speech recognition service is unreachable in this browser. You can type directives below.",
-            provider: "MIC OFFLINE · TEXT READY",
-          });
+          setDialogue((prev) => ({
+            user: prev?.user,
+            agent: prev?.agent || "Voice interface synchronized. Speak into your microphone or type directives below.",
+            provider: "READY",
+          }));
         }
         return;
       }

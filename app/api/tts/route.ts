@@ -17,9 +17,8 @@ const MAX_CACHE_SIZE = 150;
 
 const googleHttpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 12,
-  family: 4,
-  timeout: 3000,
+  maxSockets: 16,
+  timeout: 8000,
 });
 
 function sanitizeForSpeech(text: string): string {
@@ -95,7 +94,6 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
         url,
         {
           agent: googleHttpsAgent,
-          family: 4, // Force IPv4 to avoid ENETUNREACH / ETIMEDOUT on Node Happy Eyeballs
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -128,7 +126,7 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
         }
       );
 
-      req.setTimeout(2500, () => {
+      req.setTimeout(8000, () => {
         req.destroy();
         if (!settled) {
           settled = true;
@@ -206,25 +204,33 @@ function generateEspeakTTS(text: string, voiceOption = "jarvis"): Promise<Buffer
     }
 
     const tmpFile = path.join(os.tmpdir(), `ultron_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.wav`);
-    execFile("espeak-ng", ["-w", tmpFile, "-v", espeakVoice, "-p", pitch, "-s", speed, text.slice(0, 800)], (err) => {
-      if (err) {
-        return resolve(null);
-      }
-      fs.readFile(tmpFile, (readErr, data) => {
-        fs.unlink(tmpFile, () => {});
-        if (readErr || !data || data.length === 0) {
+    
+    const runEspeak = (bin: string, fallbackBin?: string) => {
+      execFile(bin, ["-w", tmpFile, "-v", espeakVoice, "-p", pitch, "-s", speed, text.slice(0, 800)], (err) => {
+        if (err && fallbackBin) {
+          return runEspeak(fallbackBin);
+        }
+        if (err) {
           return resolve(null);
         }
-        resolve(data);
+        fs.readFile(tmpFile, (readErr, data) => {
+          fs.unlink(tmpFile, () => {});
+          if (readErr || !data || data.length === 0) {
+            return resolve(null);
+          }
+          resolve(data);
+        });
       });
-    });
+    };
+
+    runEspeak("espeak-ng", "espeak");
   });
 }
 
 async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ buffer: Buffer; engine: string; contentType?: string }> {
-  const clean = sanitizeForSpeech(text).slice(0, 1000);
+  let clean = sanitizeForSpeech(text).slice(0, 1000);
   if (!clean) {
-    throw new Error("Text is empty after sanitization.");
+    clean = text.trim().slice(0, 120) || "Acknowledged.";
   }
 
   const vKey = (voiceOption || "jarvis").toLowerCase().trim();
@@ -270,9 +276,11 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
 
   try {
     const chunks = splitIntoChunks(clean);
-    const chunkBuffers = await Promise.all(
-      chunks.map((chunk) => fetchGoogleTTS(chunk, googleLang))
-    );
+    const chunkBuffers: Buffer[] = [];
+    for (const chunk of chunks) {
+      const buf = await fetchGoogleTTS(chunk, googleLang);
+      chunkBuffers.push(buf);
+    }
     const combined = Buffer.concat(chunkBuffers);
 
     if (audioCache.size >= MAX_CACHE_SIZE) {
@@ -283,7 +291,7 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
     audioCache.set(cacheKey, item);
     return item;
   } catch (err) {
-    console.warn("Google TTS failed, immediately falling back to system espeak-ng:", err);
+    console.warn("Google TTS failed, immediately falling back to system espeak:", err);
     // 3. Fallback to system espeak-ng if available
     try {
       const espeakBuffer = await generateEspeakTTS(clean, vKey);
@@ -297,7 +305,7 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
         return item;
       }
     } catch (espeakErr) {
-      console.warn("espeak-ng invocation error:", espeakErr);
+      console.warn("espeak invocation error:", espeakErr);
     }
     throw err;
   }
@@ -325,7 +333,23 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Error generating TTS audio in GET:", error);
+    console.error("Error generating TTS audio in GET, trying emergency espeak:", error);
+    try {
+      const { searchParams } = new URL(request.url);
+      const text = searchParams.get("text") || "Acknowledged";
+      const voice = searchParams.get("voice") || "jarvis";
+      const espeakBuf = await generateEspeakTTS(text, voice);
+      if (espeakBuf) {
+        return new NextResponse(new Uint8Array(espeakBuf), {
+          status: 200,
+          headers: {
+            "Content-Type": "audio/wav",
+            "Content-Length": espeakBuf.length.toString(),
+            "X-TTS-Engine": "emergency-espeak",
+          },
+        });
+      }
+    } catch {}
     return NextResponse.json({ error: "Failed to synthesize speech" }, { status: 500 });
   }
 }
@@ -352,7 +376,23 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Error generating TTS audio in POST:", error);
+    console.error("Error generating TTS audio in POST, trying emergency espeak:", error);
+    try {
+      const body = await request.json().catch(() => ({}));
+      const text = typeof body?.text === "string" ? body.text : "Acknowledged";
+      const voice = typeof body?.voice === "string" ? body.voice : "jarvis";
+      const espeakBuf = await generateEspeakTTS(text, voice);
+      if (espeakBuf) {
+        return new NextResponse(new Uint8Array(espeakBuf), {
+          status: 200,
+          headers: {
+            "Content-Type": "audio/wav",
+            "Content-Length": espeakBuf.length.toString(),
+            "X-TTS-Engine": "emergency-espeak",
+          },
+        });
+      }
+    } catch {}
     return NextResponse.json({ error: "Failed to synthesize speech" }, { status: 500 });
   }
 }
