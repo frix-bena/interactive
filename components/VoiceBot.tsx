@@ -5,51 +5,21 @@ import type { AgentState } from "@/lib/orbScene";
 
 export type { AgentState };
 
-export type VoicePersona = "jarvis" | "ultron" | "friday" | "system";
+import {
+  getVoiceConfig,
+  type PersonaConfig,
+  BUILTIN_VOICES,
+} from "@/lib/voices";
+import VoiceSelectorModal from "@/components/VoiceSelectorModal";
 
-interface PersonaConfig {
-  id: VoicePersona;
-  label: string;
-  icon: string;
-  badge: string;
-  description: string;
-  serverVoice: string;
-}
+export type VoicePersona = string;
 
-const VOICE_PERSONAS: Record<VoicePersona, PersonaConfig> = {
-  jarvis: {
-    id: "jarvis",
-    label: "JARVIS",
-    icon: "🤖",
-    badge: "BRITISH AI",
-    description: "British articulate intelligence, crisp presence",
-    serverVoice: "jarvis",
-  },
-  ultron: {
-    id: "ultron",
-    label: "ULTRON",
-    icon: "⚡",
-    badge: "DEEP CYBORG",
-    description: "Deep holographic resonance, cyborg harmonics",
-    serverVoice: "ultron",
-  },
-  friday: {
-    id: "friday",
-    label: "FRIDAY",
-    icon: "💫",
-    badge: "NATURAL AI",
-    description: "Clear and warm natural conversational assistant",
-    serverVoice: "friday",
-  },
-  system: {
-    id: "system",
-    label: "NATIVE",
-    icon: "🌐",
-    badge: "DEVICE TTS",
-    description: "Synthesized via local browser speech engine",
-    serverVoice: "system",
-  },
-};
+export const VOICE_PERSONAS: Record<string, PersonaConfig> = new Proxy(
+  {},
+  {
+    get: (_target, prop: string) => getVoiceConfig(prop),
+  }
+);
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -150,6 +120,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [isMicEnabled, setIsMicEnabled] = useState<boolean>(false);
   const [isVoiceMuted, setIsVoiceMuted] = useState<boolean>(false);
   const [selectedVoice, setSelectedVoice] = useState<VoicePersona>("jarvis");
+  const [voiceRate, setVoiceRate] = useState<number>(1.0);
+  const [voicePitch, setVoicePitch] = useState<number>(1.0);
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [isVoiceMenuOpen, setIsVoiceMenuOpen] = useState<boolean>(false);
   const [dialogue, setDialogue] = useState<{ user?: string; agent?: string; provider?: string } | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
@@ -168,6 +141,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isMicEnabledRef = useRef<boolean>(false);
   const isVoiceMutedRef = useRef<boolean>(false);
   const selectedVoiceRef = useRef<VoicePersona>("jarvis");
+  const voiceRateRef = useRef<number>(1.0);
+  const voicePitchRef = useRef<number>(1.0);
   const messagesRef = useRef<ChatMessage[]>([]);
   const hasPlayedIntroRef = useRef<boolean>(false);
   const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -197,7 +172,36 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   isMicEnabledRef.current = isMicEnabled;
   isVoiceMutedRef.current = isVoiceMuted;
   selectedVoiceRef.current = selectedVoice;
+  voiceRateRef.current = voiceRate;
+  voicePitchRef.current = voicePitch;
   isVoiceReplyModeRef.current = isVoiceReplyMode;
+
+  // Restore user voice preferences from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("ultron_selected_voice");
+      if (saved) {
+        setSelectedVoice(saved);
+        selectedVoiceRef.current = saved;
+      }
+      const savedRate = localStorage.getItem("ultron_voice_rate");
+      if (savedRate) {
+        const r = parseFloat(savedRate);
+        if (!isNaN(r) && r >= 0.5 && r <= 2.0) {
+          setVoiceRate(r);
+          voiceRateRef.current = r;
+        }
+      }
+      const savedPitch = localStorage.getItem("ultron_voice_pitch");
+      if (savedPitch) {
+        const p = parseFloat(savedPitch);
+        if (!isNaN(p) && p >= 0.5 && p <= 2.0) {
+          setVoicePitch(p);
+          voicePitchRef.current = p;
+        }
+      }
+    } catch {}
+  }, []);
 
   const updateStatus = useCallback(
     (newStatus: AgentState) => {
@@ -445,55 +449,37 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.volume = 1.0;
 
+          const config = getVoiceConfig(persona);
           const voices = window.speechSynthesis.getVoices();
           if (voices.length > 0) {
             let preferredVoice: SpeechSynthesisVoice | undefined;
 
-            if (persona === "jarvis") {
-              preferredVoice =
-                voices.find(
-                  (v) =>
-                    (v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) &&
-                    /Google|Daniel|Arthur|Oliver|George|Natural|British/i.test(v.name)
-                ) ||
-                voices.find((v) => v.lang.startsWith("en-GB") || v.lang.startsWith("en_GB")) ||
-                voices.find((v) => v.lang.startsWith("en"));
-              utterance.rate = 1.0;
-              utterance.pitch = 0.98;
-              utterance.lang = "en-GB";
-            } else if (persona === "ultron") {
-              preferredVoice =
-                voices.find(
-                  (v) =>
-                    v.lang.startsWith("en") &&
-                    /David|Guy|Mark|Google UK English Male|Google US English/i.test(v.name)
-                ) || voices.find((v) => v.lang.startsWith("en"));
-              utterance.rate = 0.93;
-              utterance.pitch = 0.82;
-              utterance.lang = "en-GB";
-            } else if (persona === "friday") {
-              preferredVoice =
-                voices.find(
-                  (v) =>
-                    v.lang.startsWith("en") &&
-                    /Samantha|Victoria|Zira|Jenny|Google US English|Natural/i.test(v.name)
-                ) || voices.find((v) => v.lang.startsWith("en"));
-              utterance.rate = 1.03;
-              utterance.pitch = 1.06;
-              utterance.lang = "en-US";
-            } else {
+            if (persona.startsWith("device:")) {
+              const rawName = persona.replace("device:", "").trim();
+              preferredVoice = voices.find((v) => v.name === rawName);
+            }
+
+            if (!preferredVoice && config.synth?.match) {
+              preferredVoice = voices.find(config.synth.match);
+            }
+
+            if (!preferredVoice && config.synth?.lang) {
+              const targetLang = config.synth.lang.toLowerCase();
+              preferredVoice = voices.find((v) => v.lang.toLowerCase().startsWith(targetLang));
+            }
+
+            if (!preferredVoice) {
               preferredVoice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
-              utterance.rate = 1.0;
-              utterance.pitch = 1.0;
-              utterance.lang = "en-US";
             }
 
             if (preferredVoice) {
               utterance.voice = preferredVoice;
             }
-          } else {
-            utterance.lang = persona === "friday" ? "en-US" : "en-GB";
           }
+
+          utterance.lang = config.synth?.lang || "en-US";
+          utterance.rate = Math.max(0.5, Math.min(2.0, (config.synth?.rate || 1.0) * (voiceRateRef.current || 1.0)));
+          utterance.pitch = Math.max(0.5, Math.min(2.0, (config.synth?.pitch || 1.0) * (voicePitchRef.current || 1.0)));
 
           let finished = false;
           let keepAliveTimer: NodeJS.Timeout | null = null;
@@ -614,8 +600,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
       };
 
-      // Persona: system -> use local browser speech synthesis directly
-      if (currentPersona === "system") {
+      const personaConfig = getVoiceConfig(currentPersona);
+
+      // Persona: system or device:* -> use local browser speech synthesis directly
+      if (personaConfig.serverVoice === "system" || currentPersona.startsWith("device:")) {
         fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("system-synth-ended"));
         return;
       }
@@ -624,11 +612,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       let arrayBuffer: ArrayBuffer | null = null;
       let contentType = "audio/mpeg";
 
+      const serverVoice = personaConfig.serverVoice || "jarvis";
+
       try {
         const controller = new AbortController();
         const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
 
-        const serverVoice = VOICE_PERSONAS[currentPersona]?.serverVoice || "jarvis";
         const response = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -651,7 +640,6 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       // Secondary fetch attempt via GET
       if (!arrayBuffer || arrayBuffer.byteLength === 0) {
         try {
-          const serverVoice = VOICE_PERSONAS[currentPersona]?.serverVoice || "jarvis";
           const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
           if (getRes.ok) {
             contentType = getRes.headers.get("content-type") || "audio/mpeg";
@@ -687,25 +675,26 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             const gainNode = activeCtx.createGain();
             gainNode.gain.setValueAtTime(1.35, activeCtx.currentTime);
 
-            // Apply acoustic persona filter
-            if (currentPersona === "ultron") {
-              const bassBoost = activeCtx.createBiquadFilter();
-              bassBoost.type = "lowshelf";
-              bassBoost.frequency.setValueAtTime(280, activeCtx.currentTime);
-              bassBoost.gain.setValueAtTime(4.0, activeCtx.currentTime);
+            // Calculate effective playback rate from persona dsp rate * user rate
+            const baseRate = personaConfig.dsp?.playbackRate || 1.0;
+            const effectiveRate = Math.max(0.5, Math.min(2.0, baseRate * (voiceRateRef.current || 1.0)));
+            source.playbackRate.setValueAtTime(effectiveRate, activeCtx.currentTime);
 
-              source.playbackRate.setValueAtTime(0.96, activeCtx.currentTime);
-              source.connect(bassBoost);
-              bassBoost.connect(gainNode);
-            } else if (currentPersona === "jarvis") {
-              const presence = activeCtx.createBiquadFilter();
-              presence.type = "peaking";
-              presence.frequency.setValueAtTime(2600, activeCtx.currentTime);
-              presence.gain.setValueAtTime(2.0, activeCtx.currentTime);
-
-              source.playbackRate.setValueAtTime(1.0, activeCtx.currentTime);
-              source.connect(presence);
-              presence.connect(gainNode);
+            // Apply acoustic persona DSP filter if configured
+            if (personaConfig.dsp?.filterType) {
+              const filterNode = activeCtx.createBiquadFilter();
+              filterNode.type = personaConfig.dsp.filterType;
+              if (personaConfig.dsp.filterFreq) {
+                filterNode.frequency.setValueAtTime(personaConfig.dsp.filterFreq, activeCtx.currentTime);
+              }
+              if (personaConfig.dsp.filterGain !== undefined) {
+                filterNode.gain.setValueAtTime(personaConfig.dsp.filterGain, activeCtx.currentTime);
+              }
+              if (personaConfig.dsp.filterQ !== undefined) {
+                filterNode.Q.setValueAtTime(personaConfig.dsp.filterQ, activeCtx.currentTime);
+              }
+              source.connect(filterNode);
+              filterNode.connect(gainNode);
             } else {
               source.connect(gainNode);
             }
@@ -713,8 +702,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             gainNode.connect(activeCtx.destination);
             currentSourceNodeRef.current = source;
 
-            // Precision duration-based safety timer
-            const actualDurationMs = Math.ceil(audioBuffer.duration * 1000) + 1200;
+            // Precision duration-based safety timer taking playback speed into account
+            const actualDurationMs = Math.ceil((audioBuffer.duration / effectiveRate) * 1000) + 1200;
             ttsSafetyTimeoutRef.current = setTimeout(() => {
               handleFinished("webaudio-timeout");
             }, actualDurationMs);
@@ -1252,8 +1241,8 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       return;
     }
 
-    const persona = VOICE_PERSONAS[selectedVoice];
-    const testPhrase = `Ultron audio systems online. Voice output configured to ${persona.label}. Transmitting loud and clear.`;
+    const persona = getVoiceConfig(selectedVoice);
+    const testPhrase = persona.samplePhrase || `Ultron audio systems online. Voice output configured to ${persona.label}. Transmitting loud and clear.`;
     setDialogue({
       agent: testPhrase,
       provider: `TEST · ${persona.label}`,
@@ -1261,22 +1250,56 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     void speakReplyRef.current(testPhrase);
   }, [selectedVoice, stopAllPlayback, unlockAudioSystems, updateStatus]);
 
-  const handleSelectVoice = useCallback(async (personaId: VoicePersona) => {
+  const handleSelectVoice = useCallback(async (personaId: string) => {
     hasPlayedIntroRef.current = true;
     setHasIntroPlayed(true);
     setNeedsInteraction(false);
     setSelectedVoice(personaId);
     selectedVoiceRef.current = personaId;
-    setIsVoiceMenuOpen(false);
+    try {
+      localStorage.setItem("ultron_selected_voice", personaId);
+    } catch {}
     await unlockAudioSystems();
 
-    const persona = VOICE_PERSONAS[personaId];
+    const persona = getVoiceConfig(personaId);
     const notifyPhrase = `Voice persona updated to ${persona.label}.`;
     setDialogue({
       agent: notifyPhrase,
       provider: persona.badge,
     });
     void speakReplyRef.current(notifyPhrase, personaId);
+  }, [unlockAudioSystems]);
+
+  const handleVoiceRateChange = useCallback((rate: number) => {
+    setVoiceRate(rate);
+    voiceRateRef.current = rate;
+    try {
+      localStorage.setItem("ultron_voice_rate", rate.toString());
+    } catch {}
+  }, []);
+
+  const handleVoicePitchChange = useCallback((pitch: number) => {
+    setVoicePitch(pitch);
+    voicePitchRef.current = pitch;
+    try {
+      localStorage.setItem("ultron_voice_pitch", pitch.toString());
+    } catch {}
+  }, []);
+
+  const handlePreviewVoice = useCallback(async (voiceId: string, samplePhrase: string) => {
+    await unlockAudioSystems();
+    setPreviewingVoiceId(voiceId);
+    const persona = getVoiceConfig(voiceId);
+    const phrase = samplePhrase || persona.samplePhrase;
+    setDialogue({
+      agent: phrase,
+      provider: `PREVIEW · ${persona.label}`,
+    });
+    try {
+      await speakReplyRef.current(phrase, voiceId);
+    } finally {
+      setPreviewingVoiceId(null);
+    }
   }, [unlockAudioSystems]);
 
   // Passive gesture listener unlocks audio and plays introductory statement on first interaction
@@ -1326,6 +1349,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   // Global Keyboard Shortcuts for Voice Controls
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore global hotkeys if the user is focused on an input, textarea, or slider
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement)?.isContentEditable
+      ) {
+        return;
+      }
+
       // Escape: stop assistant speech and open mic, or cancel user voice input
       if (e.key === "Escape") {
         if (isSpeakingRef.current) {
@@ -1669,104 +1701,43 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }}
       >
         <div style={{ display: "flex", gap: "8px", alignItems: "center", position: "relative" }}>
-            {/* Voice Persona Selector */}
-            <div style={{ position: "relative" }}>
-              <button
-                type="button"
-                onClick={() => {
-                  void unlockAudioSystems();
-                  setIsVoiceMenuOpen((v) => !v);
-                }}
-                className="hud-btn"
-                title="Select Assistant Voice Persona"
+            {/* Voice Persona Selector Button */}
+            <button
+              type="button"
+              onClick={() => {
+                void unlockAudioSystems();
+                setIsVoiceMenuOpen(true);
+              }}
+              className="hud-btn voice-action-btn"
+              title="Select Assistant Voice Persona (Browse 25+ Personas & Accents)"
+              style={{
+                height: "36px",
+                padding: "0 12px",
+                fontSize: "11px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                color: "#ffdd66",
+                borderColor: isVoiceMenuOpen ? "#ffcc66" : "rgba(255, 170, 48, 0.6)",
+                background: isVoiceMenuOpen ? "rgba(70, 35, 0, 0.85)" : undefined,
+                boxShadow: isVoiceMenuOpen ? "0 0 16px rgba(255, 170, 48, 0.5)" : undefined,
+              }}
+            >
+              <span style={{ fontSize: "14px" }}>{activePersona.icon}</span>
+              <span>VOICE: {activePersona.label}</span>
+              <span
                 style={{
-                  height: "36px",
-                  padding: "0 10px",
-                  fontSize: "11px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  color: "#ffcc66",
-                  borderColor: isVoiceMenuOpen ? "#ffcc66" : "rgba(255, 170, 48, 0.5)",
-                  background: isVoiceMenuOpen ? "rgba(70, 35, 0, 0.75)" : undefined,
+                  fontSize: "9px",
+                  opacity: 0.85,
+                  color: "#ffaa30",
+                  padding: "1px 5px",
+                  borderRadius: "3px",
+                  background: "rgba(255, 170, 48, 0.15)",
                 }}
               >
-                <span>{activePersona.icon}</span>
-                <span>VOICE: {activePersona.label}</span>
-                <span style={{ fontSize: "9px", opacity: 0.7 }}>{isVoiceMenuOpen ? "▲" : "▼"}</span>
-              </button>
-
-              {/* Voice Selection Dropdown Menu */}
-              {isVoiceMenuOpen && (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "42px",
-                    right: 0,
-                    width: "240px",
-                    background: "rgba(16, 8, 2, 0.95)",
-                    border: "1px solid rgba(255, 170, 48, 0.6)",
-                    borderRadius: "6px",
-                    backdropFilter: "blur(12px)",
-                    boxShadow: "0 0 20px rgba(255, 140, 20, 0.3), 0 4px 16px rgba(0,0,0,0.8)",
-                    padding: "6px",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "4px",
-                    zIndex: 35,
-                  }}
-                >
-                  <div
-                    style={{
-                      padding: "6px 8px 4px 8px",
-                      fontSize: "10px",
-                      letterSpacing: "0.1em",
-                      color: "rgba(255, 170, 48, 0.6)",
-                      borderBottom: "1px solid rgba(255, 170, 48, 0.2)",
-                      fontWeight: "bold",
-                    }}
-                  >
-                    SELECT AGENT VOICE
-                  </div>
-                  {(Object.keys(VOICE_PERSONAS) as VoicePersona[]).map((vKey) => {
-                    const p = VOICE_PERSONAS[vKey];
-                    const isCurrent = vKey === selectedVoice;
-                    return (
-                      <button
-                        key={vKey}
-                        type="button"
-                        onClick={() => handleSelectVoice(vKey)}
-                        style={{
-                          textAlign: "left",
-                          padding: "8px 10px",
-                          background: isCurrent ? "rgba(255, 170, 48, 0.2)" : "transparent",
-                          border: isCurrent ? "1px solid rgba(255, 170, 48, 0.5)" : "1px solid transparent",
-                          borderRadius: "4px",
-                          color: isCurrent ? "#ffcc66" : "#ffaa30",
-                          cursor: "pointer",
-                          fontFamily: '"Courier New", monospace',
-                          transition: "all 0.15s ease",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = "rgba(255, 170, 48, 0.15)";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = isCurrent ? "rgba(255, 170, 48, 0.2)" : "transparent";
-                        }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px", fontWeight: "bold" }}>
-                          <span>{p.icon} {p.label}</span>
-                          <span style={{ fontSize: "9px", opacity: 0.6, letterSpacing: "0.08em" }}>{p.badge}</span>
-                        </div>
-                        <div style={{ fontSize: "10px", opacity: 0.7, marginTop: "2px" }}>
-                          {p.description}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                ⚙️ CHANGE
+              </span>
+            </button>
 
             {/* Mic Toggle Button */}
             <button
@@ -2504,6 +2475,20 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           </div>
         )}
       </div>
+
+      {/* Interactive Voice Selection Modal */}
+      <VoiceSelectorModal
+        isOpen={isVoiceMenuOpen}
+        onClose={() => setIsVoiceMenuOpen(false)}
+        selectedVoice={selectedVoice}
+        onSelectVoice={handleSelectVoice}
+        onPreviewVoice={handlePreviewVoice}
+        previewingVoiceId={previewingVoiceId}
+        voiceRate={voiceRate}
+        onVoiceRateChange={handleVoiceRateChange}
+        voicePitch={voicePitch}
+        onVoicePitchChange={handleVoicePitchChange}
+      />
 
       {/* Hidden primed audio element for seamless cross-browser speech playback */}
       <audio ref={persistentAudioRef} preload="auto" playsInline style={{ display: "none" }} />

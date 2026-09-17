@@ -99,8 +99,13 @@ ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 - **Interrupt Assistant & Reply by Voice:** Instantly silence ULTRON during speech playback using `[⏹️ STOP ULTRON & REPLY BY VOICE]` or pressing `ESC` / `Space`, which immediately re-opens the microphone so you can reply using your voice.
 - **Dedicated Voice Input Button:** Quick `🎙️ VOICE INPUT` toggle right in the bottom command bar to easily switch between voice directives and keyboard input.
 - **Live Subtitles & Dialogue Typewriter:** Real-time HUD banner displays transcripts of what you said and autotypes ULTRON's response in sync with his speech.
-- **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity neural speech. Powered by a Web Audio API decoding pipeline that permanently unlocks browser audio and prevents autoplay blocking.
-- **Voice Persona Selector:** Choose between **JARVIS** (British articulate tech AI), **ULTRON** (Deep resonant cyborg harmonics), **FRIDAY** (Clear natural AI assistant), or **NATIVE** (Device browser synthesis).
+- **Interactive Voice Selection Interface:** Select from over 25+ distinct voices organized by categories:
+  - **AI & Sci-Fi Personas:** JARVIS (British AI), ULTRON (Deep Cyborg Harmonics), FRIDAY (Warm Natural), CORTANA (Tactical AI), EDITH (Tactical Satellite), TITAN (Sub-Harmonic Bass), G.L.A.D.O.S. (Cybernetic Synth), HAL 9000 (Calm Retro AI), AURA (Serene Ambient), NOVA (Hyper-Drive), and VALKYRIE (Defense Vanguard).
+  - **Neural Cloud Voices:** ONYX, ECHO, FABLE, SHIMMER, ALLOY, ASH, SAGE, and CORAL with high-definition audio profiles.
+  - **Regional Accents:** British (UK), American (US), Australian (AU), Irish (IE), Indian (IN), and Canadian (CA).
+  - **Native Device Voices:** Dynamically enumerates all local system voices installed on your OS via the browser Speech Synthesis engine.
+- **Voice Preview & Fine-Tuning:** Listen to instant signature samples before selecting with the inline `[▶ PREVIEW]` button, search voices instantly via the real-time filter, and adjust Speech Speed (Rate) and Pitch sliders with persistent `localStorage` memory across sessions.
+- **Audible Text-to-Speech (TTS):** ULTRON speaks every response aloud with high-fidelity neural speech. Powered by a Web Audio API decoding pipeline with custom DSP biquad filters (low-shelf bass boost, presence peaking, bandpass harmonics) tailored to each persona.
 - **Audio & Mic Toggles & Test Button:** Independent `🎙️ MIC`, `🔊 TTS`, `🔊 TEST VOICE`, and Voice Persona controls allow immediate voice testing and seamless switching between voice and silent typing modes.
 - **Audio-Reactive 3D Orb:** The holographic core surges, spins, and blooms in sync with the assistant's speech and thinking states.
 - **Telemetry History Log:** View recent conversation exchanges directly from the HUD.

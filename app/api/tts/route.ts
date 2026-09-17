@@ -147,7 +147,38 @@ function fetchGoogleTTS(chunk: string, lang = "en-gb"): Promise<Buffer> {
 }
 
 async function generateOpenAITTS(apiKey: string, text: string, voiceName?: string): Promise<Buffer | null> {
-  const voice = voiceName || process.env.OPENAI_TTS_VOICE || "onyx";
+  let voice = (voiceName || process.env.OPENAI_TTS_VOICE || "onyx").toLowerCase().trim();
+
+  // Map persona and accent keys to OpenAI voices if a persona key was provided
+  const personaToOpenAI: Record<string, string> = {
+    jarvis: "echo",
+    ultron: "onyx",
+    titan: "onyx",
+    friday: "nova",
+    cortana: "shimmer",
+    edith: "alloy",
+    glados: "fable",
+    hal: "echo",
+    aura: "coral",
+    nova: "nova",
+    valkyrie: "fable",
+    british: "fable",
+    american: "alloy",
+    australian: "echo",
+    irish: "fable",
+    indian: "alloy",
+    canadian: "echo",
+  };
+
+  if (personaToOpenAI[voice]) {
+    voice = personaToOpenAI[voice];
+  }
+
+  const validOpenAIVoices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer", "ash", "coral", "sage"];
+  if (!validOpenAIVoices.includes(voice)) {
+    voice = "onyx";
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -188,15 +219,63 @@ function generateEspeakTTS(text: string, voiceOption = "jarvis"): Promise<Buffer
     let pitch = "50";
     let speed = "150";
 
-    const v = voiceOption.toLowerCase();
+    const v = voiceOption.toLowerCase().trim();
     if (v === "friday") {
       espeakVoice = "en-us+f3";
       pitch = "62";
       speed = "155";
     } else if (v === "ultron") {
       espeakVoice = "en-gb+m3";
-      pitch = "35";
+      pitch = "32";
+      speed = "135";
+    } else if (v === "titan") {
+      espeakVoice = "en-gb+m1";
+      pitch = "24";
+      speed = "125";
+    } else if (v === "glados") {
+      espeakVoice = "en-us+f5";
+      pitch = "72";
+      speed = "150";
+    } else if (v === "cortana") {
+      espeakVoice = "en-us+f2";
+      pitch = "58";
+      speed = "152";
+    } else if (v === "edith") {
+      espeakVoice = "en-gb+f3";
+      pitch = "64";
+      speed = "156";
+    } else if (v === "hal") {
+      espeakVoice = "en-us+m2";
+      pitch = "45";
       speed = "138";
+    } else if (v === "aura") {
+      espeakVoice = "en-us+f4";
+      pitch = "55";
+      speed = "145";
+    } else if (v === "nova") {
+      espeakVoice = "en-us+f1";
+      pitch = "65";
+      speed = "160";
+    } else if (v === "valkyrie") {
+      espeakVoice = "en-gb+f4";
+      pitch = "58";
+      speed = "152";
+    } else if (v === "australian" || v === "en-au") {
+      espeakVoice = "en-au";
+      pitch = "50";
+      speed = "150";
+    } else if (v === "irish" || v === "en-ie") {
+      espeakVoice = "en-ie";
+      pitch = "52";
+      speed = "150";
+    } else if (v === "indian" || v === "en-in") {
+      espeakVoice = "en-in";
+      pitch = "50";
+      speed = "150";
+    } else if (v === "american" || v === "en-us") {
+      espeakVoice = "en-us";
+      pitch = "50";
+      speed = "150";
     } else if (v === "jarvis") {
       espeakVoice = "en-gb";
       pitch = "50";
@@ -244,21 +323,13 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
 
   // 1. Try OpenAI TTS if configured
   if (process.env.OPENAI_API_KEY) {
-    let openAiVoice = "onyx";
-    if (vKey === "friday") openAiVoice = "nova";
-    else if (vKey === "jarvis") openAiVoice = "echo";
-    else if (vKey === "titan") openAiVoice = "fable";
-    else if (["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(vKey)) {
-      openAiVoice = vKey;
-    }
-
-    const openAiBuffer = await generateOpenAITTS(process.env.OPENAI_API_KEY, clean, openAiVoice);
+    const openAiBuffer = await generateOpenAITTS(process.env.OPENAI_API_KEY, clean, vKey);
     if (openAiBuffer) {
       if (audioCache.size >= MAX_CACHE_SIZE) {
         const firstKey = audioCache.keys().next().value;
         if (firstKey) audioCache.delete(firstKey);
       }
-      const item: CachedAudio = { buffer: openAiBuffer, engine: `openai-${openAiVoice}`, contentType: "audio/mpeg" };
+      const item: CachedAudio = { buffer: openAiBuffer, engine: `openai-${vKey}`, contentType: "audio/mpeg" };
       audioCache.set(cacheKey, item);
       return item;
     }
@@ -266,12 +337,38 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
 
   // 2. High-quality neural Google TTS engine with regional persona support
   let googleLang = "en-gb";
-  if (vKey === "friday" || vKey === "en-us" || vKey === "us") {
-    googleLang = "en-us";
-  } else if (vKey === "australian" || vKey === "en-au" || vKey === "au") {
+  if (vKey === "australian" || vKey === "en-au" || vKey === "au") {
     googleLang = "en-au";
-  } else if (vKey === "jarvis" || vKey === "ultron" || vKey === "en-gb" || vKey === "uk") {
+  } else if (vKey === "irish" || vKey === "en-ie" || vKey === "ie") {
+    googleLang = "en-ie";
+  } else if (vKey === "indian" || vKey === "en-in" || vKey === "in") {
+    googleLang = "en-in";
+  } else if (vKey === "canadian" || vKey === "en-ca" || vKey === "ca") {
+    googleLang = "en-ca";
+  } else if (vKey === "south-african" || vKey === "en-za" || vKey === "za") {
+    googleLang = "en-za";
+  } else if (vKey === "japanese" || vKey === "ja" || vKey === "ja-jp") {
+    googleLang = "ja";
+  } else if (vKey === "spanish" || vKey === "es" || vKey === "es-es") {
+    googleLang = "es";
+  } else if (vKey === "french" || vKey === "fr" || vKey === "fr-fr") {
+    googleLang = "fr";
+  } else if (vKey === "german" || vKey === "de" || vKey === "de-de") {
+    googleLang = "de";
+  } else if (
+    vKey === "jarvis" ||
+    vKey === "ultron" ||
+    vKey === "edith" ||
+    vKey === "valkyrie" ||
+    vKey === "british" ||
+    vKey === "en-gb" ||
+    vKey === "uk" ||
+    vKey === "fable"
+  ) {
     googleLang = "en-gb";
+  } else {
+    // Friday, cortana, glados, hal, aura, nova, titan, american, en-us, us, onyx, echo, alloy, shimmer, ash, sage, coral, etc.
+    googleLang = "en-us";
   }
 
   try {
