@@ -1484,7 +1484,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition;
 
     if (!SpeechRecConstructor) {
-      updateStatus("idle");
+      setDialogue({
+        agent: "Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari for voice chat.",
+        provider: "VOICE SYSTEM READY",
+      });
+      updateStatus("unsupported");
       return;
     }
 
