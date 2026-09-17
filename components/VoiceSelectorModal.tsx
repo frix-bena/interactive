@@ -136,6 +136,7 @@ export default function VoiceSelectorModal({
   const counts = useMemo(() => {
     return {
       all: allVoices.length,
+      gemini: allVoices.filter((v) => v.category === "gemini").length,
       ai: allVoices.filter((v) => v.category === "ai").length,
       neural: allVoices.filter((v) => v.category === "neural").length,
       accents: allVoices.filter((v) => v.category === "accents").length,
@@ -199,24 +200,22 @@ export default function VoiceSelectorModal({
             <div>
               <div
                 style={{
+                  color: "#ffdd66",
                   fontSize: "14px",
                   fontWeight: "bold",
-                  letterSpacing: "0.15em",
-                  color: "#ffcc66",
-                  textShadow: "0 0 8px rgba(255, 204, 102, 0.7)",
+                  letterSpacing: "0.1em",
                 }}
               >
-                SELECT AGENT VOICE PERSONA
+                SELECT NEURAL VOICE TELEMETRY
               </div>
               <div
                 style={{
-                  fontSize: "11px",
-                  letterSpacing: "0.08em",
-                  color: "rgba(255, 170, 48, 0.75)",
-                  marginTop: "2px",
+                  color: "rgba(255, 170, 48, 0.7)",
+                  fontSize: "10px",
+                  letterSpacing: "0.05em",
                 }}
               >
-                Active: <strong style={{ color: "#ffdd66" }}>{currentConfig.label}</strong> ({currentConfig.badge})
+                Choose from Google Gemini 3.8 Live, Stark AI personas, Neural Cloud HD, and accents
               </div>
             </div>
           </div>
@@ -226,15 +225,15 @@ export default function VoiceSelectorModal({
             onClick={onClose}
             className="hud-btn"
             style={{
-              minWidth: "32px",
+              width: "32px",
               height: "32px",
-              padding: "0 8px",
-              fontSize: "14px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              padding: 0,
+              fontSize: "16px",
+              color: "#ffdd66",
             }}
-            title="Close voice selection (ESC)"
           >
             ✕
           </button>
@@ -326,6 +325,7 @@ export default function VoiceSelectorModal({
             {(
               [
                 { id: "all", label: "ALL VOICES", count: counts.all },
+                { id: "gemini", label: "✨ GEMINI 3.8 LIVE", count: counts.gemini },
                 { id: "ai", label: "🤖 AI PERSONAS", count: counts.ai },
                 { id: "neural", label: "🎙️ NEURAL CLOUD", count: counts.neural },
                 { id: "accents", label: "🌐 REGIONAL", count: counts.accents },

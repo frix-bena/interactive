@@ -78,20 +78,23 @@ cp .env.local.example .env.local
 Then edit `.env.local` with your preferred provider:
 
 ```env
-# Anthropic Claude
-ANTHROPIC_API_KEY=your-anthropic-api-key
-ANTHROPIC_MODEL=claude-3-5-haiku-20241022
+# Google Gemini 3.8 Live (Recommended for real-time voice interactions)
+GEMINI_API_KEY=your-gemini-key
+GEMINI_MODEL=gemini-3.8-live
+GEMINI_VOICE=Puck # Options: Puck, Nova, Orion, Capella, Fenrir, Aoede, Charon, Kore, Vega
+
+# Or Anthropic Claude
+# ANTHROPIC_API_KEY=your-anthropic-api-key
+# ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 
 # Or OpenAI / Groq
 # OPENAI_API_KEY=your-openai-or-groq-key
 # OPENAI_MODEL=gpt-4o-mini
-
-# Or Google Gemini
-# GEMINI_API_KEY=your-gemini-key
 ```
 
 ### Features
 
+- **Google Gemini 3.8 Live Integration:** Native real-time multimodal voice conversation powered by Google's `gemini-3.8-live` model via bidirectional WebSockets (`BidiGenerateContent`), delivering low-latency 24kHz synthesized voice responses directly in sync with holographic orb visualizations.
 - **Live Speech Autotyping:** Speak naturally into your microphone and watch ULTRON autotype your words directly into the interactive command bar in real time, accompanied by live holographic equalizer visualizers, glowing autotype indicators, and blinking telemetry cursors.
 - **Automatic Voice Response:** As soon as you pause speaking (natural silence detection), ULTRON automatically finalizes your query, transmits the directive, and replies aloud with high-fidelity audible neural speech (TTS) while autotyping his response across the HUD banner in sync with his voice.
 - **Hands-Free Conversational Loop:** Once ULTRON completes his voice response, the microphone automatically re-arms after an echo-suppression buffer, allowing a completely continuous, hands-free conversational loop.
@@ -99,7 +102,8 @@ ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 - **Interrupt Assistant & Reply by Voice:** Instantly silence ULTRON during speech playback using `[⏹️ STOP ULTRON & REPLY BY VOICE]` or pressing `ESC` / `Space`, which immediately re-opens the microphone so you can reply using your voice.
 - **Dedicated Voice Input Button:** Quick `🎙️ VOICE INPUT` toggle right in the bottom command bar to easily switch between voice directives and keyboard input.
 - **Live Subtitles & Dialogue Typewriter:** Real-time HUD banner displays transcripts of what you said and autotypes ULTRON's response in sync with his speech.
-- **Interactive Voice Selection Interface:** Select from over 25+ distinct voices organized by categories:
+- **Interactive Voice Selection Interface:** Select from over 30+ distinct voices organized by categories:
+  - **Gemini 3.8 Live Personas:** GEMINI PUCK (Charismatic & Engaged), GEMINI NOVA (Calm Neural), GEMINI ORION (Deep Resonant Command), GEMINI CAPELLA (Serene Soprano), GEMINI FENRIR (Energetic Machine Precision), and GEMINI AOEDE (Lyrical Articulate).
   - **AI & Sci-Fi Personas:** JARVIS (British AI), ULTRON (Deep Cyborg Harmonics), FRIDAY (Warm Natural), CORTANA (Tactical AI), EDITH (Tactical Satellite), TITAN (Sub-Harmonic Bass), G.L.A.D.O.S. (Cybernetic Synth), HAL 9000 (Calm Retro AI), AURA (Serene Ambient), NOVA (Hyper-Drive), and VALKYRIE (Defense Vanguard).
   - **Neural Cloud Voices:** ONYX, ECHO, FABLE, SHIMMER, ALLOY, ASH, SAGE, and CORAL with high-definition audio profiles.
   - **Regional Accents:** British (UK), American (US), Australian (AU), Irish (IE), Indian (IN), and Canadian (CA).
@@ -109,6 +113,6 @@ ANTHROPIC_MODEL=claude-3-5-haiku-20241022
 - **Audio & Mic Toggles & Test Button:** Independent `🎙️ MIC`, `🔊 TTS`, `🔊 TEST VOICE`, and Voice Persona controls allow immediate voice testing and seamless switching between voice and silent typing modes.
 - **Audio-Reactive 3D Orb:** The holographic core surges, spins, and blooms in sync with the assistant's speech and thinking states.
 - **Telemetry History Log:** View recent conversation exchanges directly from the HUD.
-- **Multi-Provider & Offline Fallback:** Seamlessly routes between Claude, GPT, Gemini, or ULTRON's built-in offline response engine if no keys are provided or network errors occur.
+- **Multi-Provider & Offline Fallback:** Seamlessly routes between Gemini 3.8 Live, Claude, GPT, or ULTRON's built-in offline response engine if no keys are provided or network errors occur.
 
 

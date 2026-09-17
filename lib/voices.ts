@@ -1,9 +1,9 @@
-export type VoiceCategory = "all" | "ai" | "neural" | "accents" | "device";
+export type VoiceCategory = "all" | "gemini" | "ai" | "neural" | "accents" | "device";
 
 export interface PersonaConfig {
   id: string;
   label: string;
-  category: "ai" | "neural" | "accents" | "device";
+  category: "gemini" | "ai" | "neural" | "accents" | "device";
   icon: string;
   badge: string;
   description: string;
@@ -26,6 +26,148 @@ export interface PersonaConfig {
 }
 
 export const BUILTIN_VOICES: PersonaConfig[] = [
+  // ==========================================
+  // Google Gemini 3.8 Live Personas
+  // ==========================================
+  {
+    id: "gemini-puck",
+    label: "GEMINI PUCK",
+    category: "gemini",
+    icon: "✨",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live real-time conversational voice, charismatic & engaged",
+    serverVoice: "gemini:Puck",
+    gender: "male",
+    samplePhrase: "Holographic systems online. Gemini 3.8 Live is ready for your voice directives.",
+    dsp: {
+      filterType: "peaking",
+      filterFreq: 2400,
+      filterGain: 2.0,
+      playbackRate: 1.0,
+    },
+    synth: {
+      lang: "en-US",
+      pitch: 1.0,
+      rate: 1.0,
+      match: (v) => v.lang.startsWith("en") && /Google|Natural/i.test(v.name),
+    },
+  },
+  {
+    id: "gemini-nova",
+    label: "GEMINI NOVA",
+    category: "gemini",
+    icon: "🌟",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live calm, warm natural conversational neural presence",
+    serverVoice: "gemini:Nova",
+    gender: "female",
+    samplePhrase: "Gemini 3.8 Live telemetry synchronized. How may I assist your operations today?",
+    dsp: {
+      filterType: "peaking",
+      filterFreq: 2600,
+      filterGain: 2.2,
+      playbackRate: 1.02,
+    },
+    synth: {
+      lang: "en-US",
+      pitch: 1.05,
+      rate: 1.02,
+      match: (v) => v.lang.startsWith("en") && /Samantha|Victoria|Google/i.test(v.name),
+    },
+  },
+  {
+    id: "gemini-orion",
+    label: "GEMINI ORION",
+    category: "gemini",
+    icon: "⚡",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live deep resonant intelligence with crisp command presence",
+    serverVoice: "gemini:Orion",
+    gender: "male",
+    samplePhrase: "Core neural diagnostics nominal. Gemini 3.8 Live standing by for command directives.",
+    dsp: {
+      filterType: "lowshelf",
+      filterFreq: 240,
+      filterGain: 4.0,
+      playbackRate: 0.98,
+    },
+    synth: {
+      lang: "en-GB",
+      pitch: 0.88,
+      rate: 0.96,
+      match: (v) => v.lang.startsWith("en") && /David|Guy|Google UK Male/i.test(v.name),
+    },
+  },
+  {
+    id: "gemini-capella",
+    label: "GEMINI CAPELLA",
+    category: "gemini",
+    icon: "💫",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live serene, articulate soprano with high-clarity presence",
+    serverVoice: "gemini:Capella",
+    gender: "female",
+    samplePhrase: "All sensor grids and vocal telemetry are aligned and functioning smoothly.",
+    dsp: {
+      filterType: "highshelf",
+      filterFreq: 3200,
+      filterGain: 2.5,
+      playbackRate: 1.03,
+    },
+    synth: {
+      lang: "en-US",
+      pitch: 1.1,
+      rate: 1.04,
+      match: (v) => v.lang.startsWith("en") && /Google|Zira|Female/i.test(v.name),
+    },
+  },
+  {
+    id: "gemini-fenrir",
+    label: "GEMINI FENRIR",
+    category: "gemini",
+    icon: "🐺",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live bold, energetic machine precision with fast response",
+    serverVoice: "gemini:Fenrir",
+    gender: "male",
+    samplePhrase: "Fast-response neural channels active. Ready to accelerate operations.",
+    dsp: {
+      filterType: "lowshelf",
+      filterFreq: 220,
+      filterGain: 3.5,
+      playbackRate: 1.02,
+    },
+    synth: {
+      lang: "en-US",
+      pitch: 0.92,
+      rate: 1.04,
+      match: (v) => v.lang.startsWith("en") && /David|Male/i.test(v.name),
+    },
+  },
+  {
+    id: "gemini-aoede",
+    label: "GEMINI AOEDE",
+    category: "gemini",
+    icon: "🎵",
+    badge: "GEMINI 3.8 LIVE",
+    description: "Google Gemini 3.8 Live lyrical, articulate intelligence with crystal tone",
+    serverVoice: "gemini:Aoede",
+    gender: "female",
+    samplePhrase: "Acoustic calibration complete. Ready to synthesize next instructions.",
+    dsp: {
+      filterType: "peaking",
+      filterFreq: 2800,
+      filterGain: 2.8,
+      playbackRate: 1.0,
+    },
+    synth: {
+      lang: "en-GB",
+      pitch: 1.02,
+      rate: 1.02,
+      match: (v) => v.lang.startsWith("en") && /Google UK Female|Victoria/i.test(v.name),
+    },
+  },
+
   // ==========================================
   // AI & Sci-Fi Personas
   // ==========================================
@@ -620,6 +762,15 @@ export function getVoiceConfig(id: string): PersonaConfig {
     return VOICE_MAP.get(id)!;
   }
 
+  // Handle dynamic gemini voices (e.g. gemini:Puck or gemini-puck)
+  if (id.startsWith("gemini:") || id.startsWith("gemini-")) {
+    const clean = id.replace(/^gemini[-:]/, "").toLowerCase();
+    const found = BUILTIN_VOICES.find(
+      (v) => v.id === `gemini-${clean}` || v.serverVoice.toLowerCase() === `gemini:${clean}`
+    );
+    if (found) return found;
+  }
+
   // Handle dynamic device voices (e.g. device:Google US English)
   if (id.startsWith("device:")) {
     const rawName = id.replace("device:", "").trim();
@@ -638,5 +789,5 @@ export function getVoiceConfig(id: string): PersonaConfig {
     };
   }
 
-  return VOICE_MAP.get("jarvis") || BUILTIN_VOICES[0];
+  return VOICE_MAP.get("gemini-puck") || VOICE_MAP.get("jarvis") || BUILTIN_VOICES[0];
 }

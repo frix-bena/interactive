@@ -190,37 +190,11 @@ async function callOpenAI(apiKey: string, messages: MessageInput[]): Promise<str
   return data.choices?.[0]?.message?.content || "";
 }
 
-async function callGemini(apiKey: string, messages: MessageInput[]): Promise<string> {
-  const contents = messages.map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }],
-  }));
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: SYSTEM_PROMPT }],
-      },
-      contents,
-      generationConfig: {
-        maxOutputTokens: 250,
-        temperature: 0.7,
-      },
-    }),
-  });
-
-  if (!res.ok) {
-    const errorBody = await res.text();
-    throw new Error(`Gemini API error (${res.status}): ${errorBody}`);
-  }
-
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  return text || "";
-}
+import {
+  callGeminiLive,
+  callGeminiRest,
+  resolveGeminiLiveVoice,
+} from "@/lib/geminiLive";
 
 export async function POST(request: Request) {
   try {
@@ -257,14 +231,49 @@ export async function POST(request: Request) {
       );
     }
 
+    const requestedVoice =
+      typeof body?.voice === "string" ? body.voice : (process.env.GEMINI_VOICE || "Puck");
+
     const validMessages = formattedMessages.slice(firstUserIndex);
     const lastUserMessage = [...validMessages].reverse().find((m) => m.role === "user")?.content || "";
 
     let reply = "";
     let providerUsed = "none";
+    let audioData: string | undefined = undefined;
 
-    // 1. Try Anthropic if configured
-    if (process.env.ANTHROPIC_API_KEY) {
+    // 1. Google Gemini 3.8 Live (Primary / Default for voice interactions)
+    if (process.env.GEMINI_API_KEY) {
+      const geminiVoice = resolveGeminiLiveVoice(requestedVoice);
+      try {
+        const liveResult = await callGeminiLive({
+          apiKey: process.env.GEMINI_API_KEY,
+          messages: validMessages,
+          voiceName: geminiVoice,
+          systemPrompt: SYSTEM_PROMPT,
+          model: process.env.GEMINI_MODEL || "gemini-3.8-live",
+        });
+
+        reply = liveResult.text;
+        providerUsed = "gemini-3.8-live";
+        audioData = liveResult.audioBase64;
+      } catch (err) {
+        console.warn("Gemini 3.8 Live failed, trying Gemini REST fallback:", err);
+        try {
+          reply = await callGeminiRest(
+            process.env.GEMINI_API_KEY,
+            validMessages,
+            process.env.GEMINI_REST_MODEL || "gemini-3.8-flash",
+            SYSTEM_PROMPT
+          );
+          providerUsed = "gemini-3.8-flash";
+        } catch (restErr) {
+          console.warn("Gemini REST API fallback failed:", restErr);
+        }
+      }
+    }
+
+    // 2. Try Anthropic if configured & needed
+    if (!reply && process.env.ANTHROPIC_API_KEY) {
       try {
         reply = await callAnthropic(process.env.ANTHROPIC_API_KEY, validMessages);
         providerUsed = "anthropic";
@@ -273,7 +282,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // 2. Try OpenAI / Groq if configured & needed
+    // 3. Try OpenAI / Groq if configured & needed
     if (!reply && (process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY)) {
       const apiKey = process.env.OPENAI_API_KEY || (process.env.GROQ_API_KEY as string);
       try {
@@ -281,16 +290,6 @@ export async function POST(request: Request) {
         providerUsed = "openai";
       } catch (err) {
         console.warn("OpenAI API failed, falling back to next provider:", err);
-      }
-    }
-
-    // 3. Try Gemini if configured & needed
-    if (!reply && process.env.GEMINI_API_KEY) {
-      try {
-        reply = await callGemini(process.env.GEMINI_API_KEY, validMessages);
-        providerUsed = "gemini";
-      } catch (err) {
-        console.warn("Gemini API failed, falling back to offline fallback:", err);
       }
     }
 
@@ -305,6 +304,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       reply: cleanedReply,
       provider: providerUsed,
+      audio: audioData,
+      voice: requestedVoice,
     });
   } catch (error: unknown) {
     console.error("Error in /api/chat route:", error);

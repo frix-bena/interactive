@@ -119,7 +119,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isMicEnabled, setIsMicEnabled] = useState<boolean>(false);
   const [isVoiceMuted, setIsVoiceMuted] = useState<boolean>(false);
-  const [selectedVoice, setSelectedVoice] = useState<VoicePersona>("jarvis");
+  const [selectedVoice, setSelectedVoice] = useState<VoicePersona>("gemini-puck");
   const [voiceRate, setVoiceRate] = useState<number>(1.0);
   const [voicePitch, setVoicePitch] = useState<number>(1.0);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
@@ -140,7 +140,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const isVoiceReplyModeRef = useRef<boolean>(false);
   const isMicEnabledRef = useRef<boolean>(false);
   const isVoiceMutedRef = useRef<boolean>(false);
-  const selectedVoiceRef = useRef<VoicePersona>("jarvis");
+  const selectedVoiceRef = useRef<VoicePersona>("gemini-puck");
   const voiceRateRef = useRef<number>(1.0);
   const voicePitchRef = useRef<number>(1.0);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -165,7 +165,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const processUtteranceRef = useRef<(text: string) => Promise<void>>(async () => {});
   const startListeningRef = useRef<() => void>(() => {});
   const stopListeningRef = useRef<() => void>(() => {});
-  const speakReplyRef = useRef<(text: string, override?: VoicePersona) => Promise<void>>(async () => {});
+  const speakReplyRef = useRef<(text: string, override?: VoicePersona, preloadedAudio?: string) => Promise<void>>(async () => {});
   const playIntroductoryStatementRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
 
   messagesRef.current = messages;
@@ -529,7 +529,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Multi-stage resilient pipeline with Web Audio API, boosted gain, persistent HTML5 Audio, and interactive unblock.
    */
   const speakReply = useCallback(
-    async (text: string, voicePersonaOverride?: VoicePersona) => {
+    async (text: string, voicePersonaOverride?: VoicePersona, preloadedAudio?: string) => {
       const currentPersona = voicePersonaOverride || selectedVoiceRef.current;
       const cleanText = text
         .replace(/https?:\/\/\S+/gi, "")
@@ -545,7 +545,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      console.log("[VoiceBot] speakReply transmitting:", cleanText.slice(0, 60), "persona:", currentPersona);
+      console.log("[VoiceBot] speakReply transmitting:", cleanText.slice(0, 60), "persona:", currentPersona, "hasPreload:", Boolean(preloadedAudio));
 
       // Stop any existing speech / audio playback
       stopAllPlayback();
@@ -608,45 +608,73 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         return;
       }
 
-      // 1. Primary: Fetch synthesized audio from server /api/tts
       let arrayBuffer: ArrayBuffer | null = null;
       let contentType = "audio/mpeg";
 
-      const serverVoice = personaConfig.serverVoice || "jarvis";
-
-      try {
-        const controller = new AbortController();
-        const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
-
-        const response = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: cleanText,
-            voice: serverVoice,
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(ttsFetchTimeout);
-
-        if (response.ok) {
-          contentType = response.headers.get("content-type") || "audio/mpeg";
-          arrayBuffer = await response.arrayBuffer();
+      // 1. Primary: Use preloaded audio from Gemini 3.8 Live if available
+      if (preloadedAudio) {
+        try {
+          if (preloadedAudio.startsWith("data:")) {
+            const parts = preloadedAudio.split(",");
+            const mimeMatch = parts[0].match(/:(.*?);/);
+            if (mimeMatch) contentType = mimeMatch[1];
+            const binary = atob(parts[1]);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            arrayBuffer = bytes.buffer;
+          } else {
+            const preRes = await fetch(preloadedAudio);
+            if (preRes.ok) {
+              contentType = preRes.headers.get("content-type") || "audio/wav";
+              arrayBuffer = await preRes.arrayBuffer();
+            }
+          }
+        } catch (preloadErr) {
+          console.warn("[VoiceBot] Failed to decode preloaded Gemini audio:", preloadErr);
         }
-      } catch (postErr) {
-        console.warn("[VoiceBot] POST /api/tts failed, trying GET fallback:", postErr);
       }
 
-      // Secondary fetch attempt via GET
+      const serverVoice = personaConfig.serverVoice || "gemini-puck";
+
+      // 2. Fetch synthesized audio from server /api/tts if no preloaded audio was available
       if (!arrayBuffer || arrayBuffer.byteLength === 0) {
         try {
-          const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
-          if (getRes.ok) {
-            contentType = getRes.headers.get("content-type") || "audio/mpeg";
-            arrayBuffer = await getRes.arrayBuffer();
+          const controller = new AbortController();
+          const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
+
+          const response = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: cleanText,
+              voice: serverVoice,
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(ttsFetchTimeout);
+
+          if (response.ok) {
+            contentType = response.headers.get("content-type") || "audio/mpeg";
+            arrayBuffer = await response.arrayBuffer();
           }
-        } catch (getErr) {
-          console.warn("[VoiceBot] GET /api/tts failed:", getErr);
+        } catch (postErr) {
+          console.warn("[VoiceBot] POST /api/tts failed, trying GET fallback:", postErr);
+        }
+
+        // Secondary fetch attempt via GET
+        if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+          try {
+            const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
+            if (getRes.ok) {
+              contentType = getRes.headers.get("content-type") || "audio/mpeg";
+              arrayBuffer = await getRes.arrayBuffer();
+            }
+          } catch (getErr) {
+            console.warn("[VoiceBot] GET /api/tts failed:", getErr);
+          }
         }
       }
 
@@ -803,7 +831,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: nextHistory }),
+          body: JSON.stringify({
+            messages: nextHistory,
+            voice: selectedVoiceRef.current,
+          }),
         });
 
         if (!response.ok) {
@@ -816,6 +847,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
             ? data.reply.trim()
             : "Systems online and standing by. How can I assist you?";
         const provider = typeof data?.provider === "string" ? data.provider : "core";
+        const preloadedAudio = typeof data?.audio === "string" ? data.audio : undefined;
 
         if (!isMountedRef.current) return;
 
@@ -833,10 +865,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         const charSpeedMs = Math.max(16, Math.min(36, Math.floor(3000 / Math.max(reply.length, 1))));
         let charIndex = 0;
 
+        const activeVoiceLabel =
+          VOICE_PERSONAS[selectedVoiceRef.current]?.label || selectedVoiceRef.current;
+        const providerLabel =
+          provider === "gemini-3.8-live"
+            ? "✨ GEMINI 3.8 LIVE"
+            : provider === "gemini-3.8-flash"
+            ? "GEMINI 3.8 FLASH"
+            : provider.toUpperCase();
+
         setDialogue({
           user: trimmed,
           agent: "",
-          provider: `${provider.toUpperCase()} · ${VOICE_PERSONAS[selectedVoiceRef.current].label}`,
+          provider: `${providerLabel} · ${activeVoiceLabel}`,
         });
 
         typewriterIntervalRef.current = setInterval(() => {
@@ -848,7 +889,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
           setDialogue((prev) => ({
             user: trimmed,
             agent: reply.slice(0, charIndex),
-            provider: `${provider.toUpperCase()} · ${VOICE_PERSONAS[selectedVoiceRef.current].label}`,
+            provider: `${providerLabel} · ${activeVoiceLabel}`,
           }));
 
           if (charIndex >= reply.length) {
@@ -860,7 +901,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }, charSpeedMs);
 
         // Keep isThinkingRef.current true until speakReply engages isSpeakingRef.current
-        void speakReplyRef.current(reply);
+        void speakReplyRef.current(reply, undefined, preloadedAudio);
 
         // Auto-fade dialogue after 25 seconds of inactivity
         dialogueTimerRef.current = setTimeout(() => {

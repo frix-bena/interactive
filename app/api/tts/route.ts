@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { synthesizeGeminiLiveVoice, resolveGeminiLiveVoice } from "@/lib/geminiLive";
 
 // In-memory audio cache for frequent phrases
 interface CachedAudio {
@@ -321,7 +322,29 @@ async function generateAudio(text: string, voiceOption = "jarvis"): Promise<{ bu
     return cached;
   }
 
-  // 1. Try OpenAI TTS if configured
+  // 1. Try Gemini 3.8 Live TTS if configured & requested
+  if (
+    process.env.GEMINI_API_KEY &&
+    (vKey.startsWith("gemini") || process.env.TTS_PROVIDER === "gemini")
+  ) {
+    const geminiVoice = resolveGeminiLiveVoice(vKey);
+    const geminiBuffer = await synthesizeGeminiLiveVoice(process.env.GEMINI_API_KEY, clean, geminiVoice);
+    if (geminiBuffer) {
+      if (audioCache.size >= MAX_CACHE_SIZE) {
+        const firstKey = audioCache.keys().next().value;
+        if (firstKey) audioCache.delete(firstKey);
+      }
+      const item: CachedAudio = {
+        buffer: geminiBuffer,
+        engine: `gemini-3.8-live-${geminiVoice}`,
+        contentType: "audio/wav",
+      };
+      audioCache.set(cacheKey, item);
+      return item;
+    }
+  }
+
+  // 2. Try OpenAI TTS if configured
   if (process.env.OPENAI_API_KEY) {
     const openAiBuffer = await generateOpenAITTS(process.env.OPENAI_API_KEY, clean, vKey);
     if (openAiBuffer) {
