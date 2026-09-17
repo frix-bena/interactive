@@ -94,7 +94,7 @@ GEMINI_VOICE=Puck # Options: Puck, Nova, Orion, Capella, Fenrir, Aoede, Charon, 
 
 ### Features
 
-- **Google Gemini 3.8 Live Integration:** Native real-time multimodal voice conversation powered by Google's `gemini-3.8-live` model via bidirectional WebSockets (`BidiGenerateContent`), delivering low-latency 24kHz synthesized voice responses directly in sync with holographic orb visualizations.
+- **Direct Client-Side Live API WebSocket Protocol:** Native real-time multimodal voice conversation connecting browser client code directly to Google's Live API WebSocket protocol (`BidiGenerateContent`), eliminating standard HTTP request-response overhead and streaming sub-second 24kHz synthesized voice responses and text tokens simultaneously in sync with holographic orb visualizations.
 - **Live Speech Autotyping:** Speak naturally into your microphone and watch ULTRON autotype your words directly into the interactive command bar in real time, accompanied by live holographic equalizer visualizers, glowing autotype indicators, and blinking telemetry cursors.
 - **Automatic Voice Response:** As soon as you pause speaking (natural silence detection), ULTRON automatically finalizes your query, transmits the directive, and replies aloud with high-fidelity audible neural speech (TTS) while autotyping his response across the HUD banner in sync with his voice.
 - **Hands-Free Conversational Loop:** Once ULTRON completes his voice response, the microphone automatically re-arms after an echo-suppression buffer, allowing a completely continuous, hands-free conversational loop.

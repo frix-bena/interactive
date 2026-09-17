@@ -11,6 +11,11 @@ import {
   BUILTIN_VOICES,
 } from "@/lib/voices";
 import VoiceSelectorModal from "@/components/VoiceSelectorModal";
+import {
+  GeminiLiveWsClient,
+  type GeminiLiveClientState,
+  resolveGeminiLiveVoice,
+} from "@/lib/geminiLiveClient";
 
 export type VoicePersona = string;
 
@@ -129,6 +134,14 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const [hasIntroPlayed, setHasIntroPlayed] = useState<boolean>(false);
   const [needsInteraction, setNeedsInteraction] = useState<boolean>(false);
   const [pendingVoiceAudio, setPendingVoiceAudio] = useState<{ play: () => void; text: string } | null>(null);
+  const [wsState, setWsState] = useState<GeminiLiveClientState>("disconnected");
+  const [geminiApiKey, setGeminiApiKey] = useState<string>("");
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [apiKeyInput, setApiKeyInput] = useState<string>("");
+
+  const geminiLiveWsClientRef = useRef<GeminiLiveWsClient | null>(null);
+  const wsStateRef = useRef<GeminiLiveClientState>("disconnected");
+  wsStateRef.current = wsState;
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isRecognitionActiveRef = useRef<boolean>(false);
@@ -216,6 +229,11 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
    * Stop any active audio playback node, HTML5 audio element, or speech synthesis utterance.
    */
   const stopAllPlayback = useCallback(() => {
+    if (geminiLiveWsClientRef.current) {
+      try {
+        geminiLiveWsClientRef.current.stopPlayback();
+      } catch {}
+    }
     if (currentSourceNodeRef.current) {
       try {
         currentSourceNodeRef.current.stop();
@@ -337,6 +355,135 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       return false;
     }
   }, []);
+
+  /**
+   * Connect to Gemini Multimodal Live API WebSocket directly from client code.
+   */
+  const initGeminiLiveWebSocket = useCallback(
+    async (customKey?: string) => {
+      if (typeof window === "undefined") return;
+
+      let key = customKey !== undefined ? customKey : geminiApiKey;
+      if (!key) {
+        try {
+          key = localStorage.getItem("ultron_gemini_api_key") || "";
+        } catch {}
+      }
+      if (!key && typeof process !== "undefined" && process.env?.NEXT_PUBLIC_GEMINI_API_KEY) {
+        key = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+      }
+
+      if (!key) {
+        try {
+          const res = await fetch("/api/live-session");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.apiKey) {
+              key = data.apiKey;
+            }
+          }
+        } catch (err) {
+          console.warn("[VoiceBot] Failed to fetch live session configuration:", err);
+        }
+      }
+
+      if (key) {
+        setGeminiApiKey(key);
+        setApiKeyInput(key);
+        try {
+          localStorage.setItem("ultron_gemini_api_key", key);
+        } catch {}
+
+        const personaConfig = getVoiceConfig(selectedVoiceRef.current);
+        const targetVoice = resolveGeminiLiveVoice(selectedVoiceRef.current);
+        const model = process.env.NEXT_PUBLIC_GEMINI_MODEL || "gemini-3.8-live";
+
+        if (geminiLiveWsClientRef.current) {
+          geminiLiveWsClientRef.current.disconnect();
+        }
+
+        const client = new GeminiLiveWsClient({
+          apiKey: key,
+          model,
+          voiceName: targetVoice,
+          audioContext: audioContextRef.current,
+          playbackRate: voiceRateRef.current,
+          dspFilterType: personaConfig.dsp?.filterType,
+          dspFilterFreq: personaConfig.dsp?.filterFreq,
+          dspFilterGain: personaConfig.dsp?.filterGain,
+          dspFilterQ: personaConfig.dsp?.filterQ,
+          onStateChange: (newState) => {
+            if (!isMountedRef.current) return;
+            setWsState(newState);
+            wsStateRef.current = newState;
+          },
+          onTextChunk: (_chunk, fullText) => {
+            if (!isMountedRef.current) return;
+            const activeVoiceLabel =
+              VOICE_PERSONAS[selectedVoiceRef.current]?.label || selectedVoiceRef.current;
+            setDialogue((prev) => ({
+              user: prev?.user || "Directive in progress...",
+              agent: fullText,
+              provider: `✨ GEMINI 3.8 LIVE (WS ACTIVE) · ${activeVoiceLabel}`,
+            }));
+          },
+          onAudioChunk: () => {
+            if (!isMountedRef.current) return;
+            if (!isSpeakingRef.current) {
+              isSpeakingRef.current = true;
+              isThinkingRef.current = false;
+              updateStatus("speaking");
+            }
+          },
+          onTurnComplete: (fullText, audioWavBase64) => {
+            if (!isMountedRef.current) return;
+            console.log("[VoiceBot] Live WebSocket turn completed:", fullText.slice(0, 50));
+            const assistantMessage: ChatMessage = { role: "assistant", content: fullText };
+            const finalHistory = [...messagesRef.current, assistantMessage].slice(-20);
+            setMessages(finalHistory);
+            messagesRef.current = finalHistory;
+
+            const estDurationMs = audioWavBase64 ? 1200 : Math.max(1200, Math.ceil((fullText.length / 15) * 1000));
+            setTimeout(() => {
+              if (!isMountedRef.current) return;
+              isSpeakingRef.current = false;
+              isThinkingRef.current = false;
+              updateStatus(isMicEnabledRef.current ? "listening" : "idle");
+              if (isMicEnabledRef.current) {
+                startListeningRef.current();
+              }
+            }, estDurationMs);
+
+            if (dialogueTimerRef.current) clearTimeout(dialogueTimerRef.current);
+            dialogueTimerRef.current = setTimeout(() => {
+              if (isMountedRef.current && !isSpeakingRef.current && !isThinkingRef.current) {
+                setDialogue(null);
+              }
+            }, 25000);
+          },
+          onInterrupted: () => {
+            console.log("[VoiceBot] Live WebSocket speech interrupted by user barge-in");
+            isSpeakingRef.current = false;
+            updateStatus(isMicEnabledRef.current ? "listening" : "idle");
+          },
+          onError: (err) => {
+            console.warn("[VoiceBot] Gemini Live WebSocket error:", err);
+          },
+        });
+
+        geminiLiveWsClientRef.current = client;
+        void client.connect();
+      } else {
+        setWsState("disconnected");
+        wsStateRef.current = "disconnected";
+      }
+    },
+    [geminiApiKey, updateStatus]
+  );
+
+  useEffect(() => {
+    void initGeminiLiveWebSocket();
+  }, [initGeminiLiveWebSocket]);
 
   const startListening = useCallback(() => {
     if (
@@ -889,98 +1036,72 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       setMessages(nextHistory);
       messagesRef.current = nextHistory;
 
-      try {
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: nextHistory,
-            voice: selectedVoiceRef.current,
-          }),
-        });
+      // Ensure AudioContext is unlocked
+      const ctx = await unlockAudioSystems();
 
-        if (!response.ok) {
-          throw new Error(`Chat API error: status ${response.status}`);
+      // 1. PRIMARY PATH: Direct Live API WebSocket Protocol
+      const liveWsClient = geminiLiveWsClientRef.current;
+      const isWsReady =
+        liveWsClient && (liveWsClient.isConnected() || wsStateRef.current === "connecting");
+
+      if (isWsReady && liveWsClient) {
+        try {
+          if (!liveWsClient.isConnected()) {
+            await liveWsClient.connect();
+          }
+
+          if (ctx) {
+            const personaConfig = getVoiceConfig(selectedVoiceRef.current);
+            liveWsClient.updateOptions({
+              audioContext: ctx,
+              voiceName: resolveGeminiLiveVoice(selectedVoiceRef.current),
+              playbackRate: voiceRateRef.current,
+              dspFilterType: personaConfig.dsp?.filterType,
+              dspFilterFreq: personaConfig.dsp?.filterFreq,
+              dspFilterGain: personaConfig.dsp?.filterGain,
+              dspFilterQ: personaConfig.dsp?.filterQ,
+            });
+          }
+
+          const activeVoiceLabel =
+            VOICE_PERSONAS[selectedVoiceRef.current]?.label || selectedVoiceRef.current;
+
+          setDialogue({
+            user: trimmed,
+            agent: "",
+            provider: `✨ GEMINI 3.8 LIVE (WS PROTOCOL) · ${activeVoiceLabel}`,
+          });
+
+          // Transmit directive directly via the Live API WebSocket protocol!
+          await liveWsClient.sendUserMessage(trimmed, nextHistory);
+          return;
+        } catch (wsErr) {
+          console.warn("[VoiceBot] Direct Live API WebSocket send failed, checking fallback:", wsErr);
         }
+      }
 
-        const data = await response.json().catch(() => ({}));
-        const reply =
-          typeof data?.reply === "string" && data.reply.trim()
-            ? data.reply.trim()
-            : "Systems online and standing by. How can I assist you?";
-        const provider = typeof data?.provider === "string" ? data.provider : "core";
-        const preloadedAudio = typeof data?.audio === "string" ? data.audio : undefined;
-
-        if (!isMountedRef.current) return;
-
-        const assistantMessage: ChatMessage = { role: "assistant", content: reply };
-        const finalHistory = [...messagesRef.current, assistantMessage].slice(-20);
-        setMessages(finalHistory);
-        messagesRef.current = finalHistory;
-
-        // Synchronized typewriter effect for agent's spoken response
-        if (typewriterIntervalRef.current) {
-          clearInterval(typewriterIntervalRef.current);
-          typewriterIntervalRef.current = null;
-        }
-
-        const charSpeedMs = Math.max(16, Math.min(36, Math.floor(3000 / Math.max(reply.length, 1))));
-        let charIndex = 0;
-
-        const activeVoiceLabel =
-          VOICE_PERSONAS[selectedVoiceRef.current]?.label || selectedVoiceRef.current;
-        const providerLabel =
-          provider === "gemini-3.8-live"
-            ? "✨ GEMINI 3.8 LIVE"
-            : provider === "gemini-3.8-flash"
-            ? "GEMINI 3.8 FLASH"
-            : provider.toUpperCase();
-
-        setDialogue({
-          user: trimmed,
-          agent: "",
-          provider: `${providerLabel} · ${activeVoiceLabel}`,
-        });
-
-        typewriterIntervalRef.current = setInterval(() => {
-          if (!isMountedRef.current) {
-            if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
+      // If client has an API key but WebSocket is not connected, attempt immediate connection
+      if (geminiApiKey && (!liveWsClient || !liveWsClient.isConnected())) {
+        try {
+          await initGeminiLiveWebSocket(geminiApiKey);
+          if (geminiLiveWsClientRef.current?.isConnected()) {
+            const activeVoiceLabel =
+              VOICE_PERSONAS[selectedVoiceRef.current]?.label || selectedVoiceRef.current;
+            setDialogue({
+              user: trimmed,
+              agent: "",
+              provider: `✨ GEMINI 3.8 LIVE (WS PROTOCOL) · ${activeVoiceLabel}`,
+            });
+            await geminiLiveWsClientRef.current.sendUserMessage(trimmed, nextHistory);
             return;
           }
-          charIndex += 1;
-          setDialogue((prev) => ({
-            user: trimmed,
-            agent: reply.slice(0, charIndex),
-            provider: `${providerLabel} · ${activeVoiceLabel}`,
-          }));
-
-          if (charIndex >= reply.length) {
-            if (typewriterIntervalRef.current) {
-              clearInterval(typewriterIntervalRef.current);
-              typewriterIntervalRef.current = null;
-            }
-          }
-        }, charSpeedMs);
-
-        // Keep isThinkingRef.current true until speakReply engages isSpeakingRef.current
-        void speakReplyRef.current(reply, undefined, preloadedAudio);
-
-        // Auto-fade dialogue after 25 seconds of inactivity
-        dialogueTimerRef.current = setTimeout(() => {
-          if (isMountedRef.current && !isSpeakingRef.current && !isThinkingRef.current) {
-            setDialogue(null);
-          }
-        }, 25000);
-      } catch (error) {
-        console.error("Error communicating with /api/chat:", error);
-        if (!isMountedRef.current) return;
-
-        if (typewriterIntervalRef.current) {
-          clearInterval(typewriterIntervalRef.current);
-          typewriterIntervalRef.current = null;
+        } catch (initErr) {
+          console.warn("[VoiceBot] WebSocket init attempt during utterance failed:", initErr);
         }
+      }
 
-        // Guaranteed response via built-in client cognition fallback
+      // 2. FALLBACK PATH: Built-in client cognition
+      try {
         const fallbackReply = generateClientOfflineReply(trimmed);
         const fallbackMsg: ChatMessage = { role: "assistant", content: fallbackReply };
         const finalHistory = [...messagesRef.current, fallbackMsg].slice(-20);
@@ -990,13 +1111,15 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         setDialogue({
           user: trimmed,
           agent: fallbackReply,
-          provider: "OFFLINE COGNITION",
+          provider: "OFFLINE COGNITION (WS STANDBY)",
         });
 
         void speakReplyRef.current(fallbackReply);
+      } catch (fallbackErr) {
+        console.error("Error in fallback utterance processing:", fallbackErr);
       }
     },
-    [stopListening, updateStatus]
+    [geminiApiKey, initGeminiLiveWebSocket, stopListening, unlockAudioSystems, updateStatus]
   );
 
   processUtteranceRef.current = processUtterance;
@@ -1372,6 +1495,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     try {
       localStorage.setItem("ultron_selected_voice", personaId);
     } catch {}
+    if (geminiLiveWsClientRef.current) {
+      geminiLiveWsClientRef.current.updateVoice(personaId);
+    }
     await unlockAudioSystems();
 
     const persona = getVoiceConfig(personaId);
@@ -1389,6 +1515,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     try {
       localStorage.setItem("ultron_voice_rate", rate.toString());
     } catch {}
+    if (geminiLiveWsClientRef.current) {
+      geminiLiveWsClientRef.current.updateOptions({ playbackRate: rate });
+    }
   }, []);
 
   const handleVoicePitchChange = useCallback((pitch: number) => {
@@ -1799,6 +1928,12 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         } catch {}
         recognitionRef.current = null;
       }
+      if (geminiLiveWsClientRef.current) {
+        try {
+          geminiLiveWsClientRef.current.disconnect();
+        } catch {}
+        geminiLiveWsClientRef.current = null;
+      }
       stopAllPlayback();
     };
   }, [stopAllPlayback, updateStatus]);
@@ -1931,6 +2066,40 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
               }}
             >
               VOICE LOG ({messages.length})
+            </button>
+
+            {/* Live API WebSocket Status & Configuration Button */}
+            <button
+              type="button"
+              onClick={() => setIsApiKeyModalOpen(true)}
+              className="hud-btn"
+              title="Gemini Multimodal Live API WebSocket Protocol Configuration & Status"
+              style={{
+                height: "36px",
+                padding: "0 11px",
+                fontSize: "11px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                color:
+                  wsState === "connected"
+                    ? "#00ffcc"
+                    : wsState === "connecting"
+                    ? "#ffdd66"
+                    : "rgba(255, 170, 48, 0.7)",
+                borderColor:
+                  wsState === "connected"
+                    ? "rgba(0, 255, 204, 0.6)"
+                    : wsState === "connecting"
+                    ? "rgba(255, 221, 102, 0.5)"
+                    : "rgba(255, 170, 48, 0.3)",
+                background:
+                  wsState === "connected"
+                    ? "rgba(0, 40, 30, 0.6)"
+                    : undefined,
+              }}
+            >
+              <span>{wsState === "connected" ? "⚡ LIVE WS: ON" : wsState === "connecting" ? "⏳ WS CONNECTING" : "📡 WS STANDBY"}</span>
             </button>
 
             {/* Status Pill */}
@@ -2609,6 +2778,152 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         voicePitch={voicePitch}
         onVoicePitchChange={handleVoicePitchChange}
       />
+
+      {/* Live API WebSocket Protocol Configuration Modal */}
+      {isApiKeyModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(6, 3, 1, 0.85)",
+            backdropFilter: "blur(12px)",
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsApiKeyModalOpen(false);
+          }}
+        >
+          <div
+            style={{
+              width: "540px",
+              maxWidth: "92vw",
+              background: "rgba(18, 9, 3, 0.96)",
+              border: "1px solid rgba(255, 170, 48, 0.6)",
+              borderRadius: "8px",
+              boxShadow: "0 0 35px rgba(255, 170, 48, 0.35)",
+              padding: "24px",
+              color: "#ffcc66",
+              fontFamily: "monospace, sans-serif",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "20px" }}>⚡</span>
+                <span style={{ fontSize: "14px", fontWeight: "bold", letterSpacing: "0.1em", color: "#ffaa30" }}>
+                  GEMINI LIVE API WEBSOCKET PROTOCOL
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsApiKeyModalOpen(false)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#ffaa30",
+                  fontSize: "18px",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ fontSize: "11px", lineHeight: "1.6", color: "rgba(255, 200, 100, 0.8)", marginBottom: "16px" }}>
+              The client code is hooked up directly to Google&apos;s real-time multimodal Live API WebSocket protocol (<code>BidiGenerateContent</code>), bypassing standard HTTP request-response round trips to stream 24kHz audio and text simultaneously with sub-second latency.
+            </div>
+
+            <div style={{ background: "rgba(30, 15, 5, 0.6)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255, 170, 48, 0.2)", marginBottom: "16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "11px" }}>
+                <span style={{ opacity: 0.7 }}>WebSocket State:</span>
+                <span style={{ color: wsState === "connected" ? "#00ffcc" : wsState === "connecting" ? "#ffdd66" : "#ff5555", fontWeight: "bold" }}>
+                  {wsState === "connected" ? "● CONNECTED (BIDIRECTIONAL WEBSOCKET)" : wsState === "connecting" ? "◌ CONNECTING..." : "○ DISCONNECTED"}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "11px" }}>
+                <span style={{ opacity: 0.7 }}>Protocol:</span>
+                <span style={{ fontSize: "10px", color: "#ffdd66" }}>BidiGenerateContent (WebSocket)</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "11px" }}>
+                <span style={{ opacity: 0.7 }}>Endpoint:</span>
+                <span style={{ fontSize: "10px", opacity: 0.9 }}>wss://generativelanguage.googleapis.com/...</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px" }}>
+                <span style={{ opacity: 0.7 }}>Model / Voice:</span>
+                <span>{process.env.NEXT_PUBLIC_GEMINI_MODEL || "gemini-3.8-live"} · {resolveGeminiLiveVoice(selectedVoice)}</span>
+              </div>
+            </div>
+
+            <label style={{ display: "block", fontSize: "11px", fontWeight: "bold", color: "#ffaa30", marginBottom: "6px" }}>
+              GOOGLE GEMINI API KEY:
+            </label>
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              placeholder="Enter Gemini API key (AIzaSy...)"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                fontSize: "12px",
+                background: "rgba(10, 5, 0, 0.8)",
+                border: "1px solid rgba(255, 170, 48, 0.4)",
+                borderRadius: "4px",
+                color: "#ffdd66",
+                outline: "none",
+                marginBottom: "16px",
+                fontFamily: "monospace",
+              }}
+            />
+
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "10px" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  void initGeminiLiveWebSocket(apiKeyInput.trim());
+                }}
+                className="hud-btn"
+                style={{
+                  flex: 1,
+                  height: "38px",
+                  fontSize: "11px",
+                  background: "rgba(255, 170, 48, 0.25)",
+                  borderColor: "#ffaa30",
+                  color: "#ffdd66",
+                  fontWeight: "bold",
+                }}
+              >
+                CONNECT WEBSOCKET
+              </button>
+              {geminiApiKey && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.removeItem("ultron_gemini_api_key");
+                    setGeminiApiKey("");
+                    setApiKeyInput("");
+                    geminiLiveWsClientRef.current?.disconnect();
+                    setWsState("disconnected");
+                  }}
+                  className="hud-btn"
+                  style={{
+                    height: "38px",
+                    fontSize: "11px",
+                    color: "#ff7777",
+                    borderColor: "rgba(255, 100, 100, 0.4)",
+                  }}
+                >
+                  DISCONNECT
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hidden primed audio element for seamless cross-browser speech playback */}
       <audio ref={persistentAudioRef} preload="auto" playsInline style={{ display: "none" }} />

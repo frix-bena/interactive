@@ -1,8 +1,10 @@
 /**
- * Gemini 3.8 Live WebSocket and REST Client
+ * Gemini Live WebSocket and REST Client
  * Integrates Google's real-time multimodal Live API (gemini-3.8-live)
  * to stream conversational responses and native 24kHz audio directly.
  */
+
+export * from "./geminiLiveClient";
 
 export interface GeminiLiveOptions {
   apiKey: string;
@@ -21,94 +23,29 @@ export interface GeminiLiveResult {
   voice: string;
 }
 
+import {
+  pcmToWav as pcmToWavArrayBuffer,
+  resolveGeminiLiveVoice,
+} from "./geminiLiveClient";
+
 /**
- * Standard WAV file header creation for 24kHz 16-bit mono PCM from Gemini Live
+ * Standard WAV file header creation for 24kHz 16-bit mono PCM from Gemini Live.
+ * Supports both Node.js Buffer and browser Uint8Array.
  */
 export function pcmToWav(
-  pcmBuffer: Buffer,
+  pcmBuffer: Buffer | Uint8Array,
   sampleRate = 24000,
   numChannels = 1,
   bitsPerSample = 16
 ): Buffer {
-  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
-  const blockAlign = (numChannels * bitsPerSample) / 8;
-  const dataSize = pcmBuffer.length;
-  const header = Buffer.alloc(44);
-
-  // RIFF identifier
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + dataSize, 4);
-  header.write("WAVE", 8);
-
-  // "fmt " sub-chunk
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16); // subchunk1 size (16 for PCM)
-  header.writeUInt16LE(1, 20); // audio format (1 = PCM)
-  header.writeUInt16LE(numChannels, 22); // number of channels (1 = mono)
-  header.writeUInt32LE(sampleRate, 24); // sample rate
-  header.writeUInt32LE(byteRate, 28); // byte rate
-  header.writeUInt16LE(blockAlign, 32); // block align
-  header.writeUInt16LE(bitsPerSample, 34); // bits per sample
-
-  // "data" sub-chunk
-  header.write("data", 36);
-  header.writeUInt32LE(dataSize, 40);
-
-  return Buffer.concat([header, pcmBuffer]);
+  const bytes = pcmBuffer instanceof Uint8Array ? pcmBuffer : new Uint8Array(pcmBuffer);
+  const ab = pcmToWavArrayBuffer(bytes, sampleRate, numChannels, bitsPerSample);
+  return Buffer.from(ab);
 }
 
 /**
- * Maps persona ID / voice preference to supported Gemini 3.8 Live voice names.
- * Supported Gemini Live voices: Puck, Charon, Kore, Fenrir, Aoede, Nova, Orion, Capella, Vega, Dipper, Eclipse, Lyra, Orbit, Pegasus, Ursa.
- */
-export function resolveGeminiLiveVoice(voiceKey?: string): string {
-  if (!voiceKey) return "Puck";
-
-  const clean = voiceKey.toLowerCase().replace(/^gemini[-:]?/, "").trim();
-  const validVoices: Record<string, string> = {
-    puck: "Puck",
-    charon: "Charon",
-    kore: "Kore",
-    fenrir: "Fenrir",
-    aoede: "Aoede",
-    nova: "Nova",
-    orion: "Orion",
-    capella: "Capella",
-    vega: "Vega",
-    dipper: "Dipper",
-    eclipse: "Eclipse",
-    lyra: "Lyra",
-    orbit: "Orbit",
-    pegasus: "Pegasus",
-    ursa: "Ursa",
-    // Persona aliases
-    jarvis: "Orion",
-    ultron: "Fenrir",
-    titan: "Orion",
-    friday: "Nova",
-    cortana: "Aoede",
-    edith: "Capella",
-    glados: "Aoede",
-    hal: "Charon",
-    aura: "Capella",
-    valkyrie: "Fenrir",
-    british: "Orion",
-    american: "Puck",
-    australian: "Puck",
-    irish: "Nova",
-    onyx: "Orion",
-    echo: "Puck",
-    fable: "Orion",
-    shimmer: "Capella",
-    alloy: "Nova",
-  };
-
-  return validVoices[clean] || "Puck";
-}
-
-/**
- * Connects to Gemini 3.8 Live via bidirectional WebSocket (BidiGenerateContent)
- * to receive native 24kHz audio and text response.
+ * Connects to Gemini Live via bidirectional WebSocket (BidiGenerateContent)
+ * on the server side to receive 24kHz audio and text response.
  */
 export async function callGeminiLive(options: GeminiLiveOptions): Promise<GeminiLiveResult> {
   const {
@@ -174,7 +111,7 @@ export async function callGeminiLive(options: GeminiLiveOptions): Promise<Gemini
       if (audioPcmChunks.length > 0 || textChunks.length > 0) {
         settleSuccess();
       } else {
-        settleFailure(new Error(`Gemini 3.8 Live connection timed out after ${timeoutMs}ms`));
+        settleFailure(new Error(`Gemini Live connection timed out after ${timeoutMs}ms`));
       }
     }, timeoutMs);
 
@@ -281,7 +218,7 @@ export async function callGeminiLive(options: GeminiLiveOptions): Promise<Gemini
 }
 
 /**
- * Fallback REST content generator using Gemini 3.8 Flash / REST API
+ * Fallback REST content generator using Gemini Flash REST API
  */
 export async function callGeminiRest(
   apiKey: string,
@@ -321,7 +258,7 @@ export async function callGeminiRest(
 }
 
 /**
- * Synthesizes speech using Gemini 3.8 Live WebSocket for TTS queries
+ * Synthesizes speech using Gemini Live WebSocket for TTS queries
  */
 export async function synthesizeGeminiLiveVoice(
   apiKey: string,
