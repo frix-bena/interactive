@@ -1232,13 +1232,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
       // Request microphone access ahead of time so when Ultron finishes speaking, mic auto-engages
       void ensureMicrophoneAccess().then((granted) => {
-        if (granted && isMountedRef.current) {
+        if (!isMountedRef.current) return;
+        if (granted) {
           setIsMicEnabled(true);
           isMicEnabledRef.current = true;
           if (!isSpeakingRef.current && !isThinkingRef.current) {
             startListeningRef.current();
             updateStatus("listening");
           }
+        } else {
+          setDialogue({
+            agent: "Microphone permission is required for voice chat. Please allow microphone access in your browser.",
+            provider: "MIC PERMISSION REQUIRED",
+          });
         }
       });
 
