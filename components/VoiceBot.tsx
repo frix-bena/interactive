@@ -1173,6 +1173,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         if (granted && isMountedRef.current) {
           setIsMicEnabled(true);
           isMicEnabledRef.current = true;
+          if (!isSpeakingRef.current && !isThinkingRef.current) {
+            startListeningRef.current();
+            updateStatus("listening");
+          }
         }
       });
 
@@ -1220,7 +1224,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
       }, 25000);
     },
-    [ensureMicrophoneAccess, unlockAudioSystems]
+    [ensureMicrophoneAccess, unlockAudioSystems, updateStatus]
   );
 
   playIntroductoryStatementRef.current = playIntroductoryStatement;
