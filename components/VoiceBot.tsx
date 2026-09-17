@@ -157,6 +157,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
   const keepAliveOscRef = useRef<OscillatorNode | null>(null);
   const persistentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const globalSafetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dialogueTimerRef = useRef<NodeJS.Timeout | null>(null);
   const typewriterIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -242,6 +243,10 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     if (ttsSafetyTimeoutRef.current) {
       clearTimeout(ttsSafetyTimeoutRef.current);
       ttsSafetyTimeoutRef.current = null;
+    }
+    if (globalSafetyTimeoutRef.current) {
+      clearTimeout(globalSafetyTimeoutRef.current);
+      globalSafetyTimeoutRef.current = null;
     }
     setPendingVoiceAudio(null);
   }, []);
@@ -557,22 +562,19 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       isThinkingRef.current = false;
       updateStatus("speaking");
 
-      // Pre-unlock AudioContext if needed
-      const ctx = await unlockAudioSystems();
-      if (ctx && ctx.state === "suspended") {
-        try {
-          await ctx.resume();
-        } catch (e) {
-          console.warn("[VoiceBot] ctx.resume:", e);
-        }
-      }
-      playJarvisChirp();
-
       let isFinished = false;
+      let playbackStarted = false;
+      let hasError = false;
+
       const handleFinished = (reason = "normal") => {
         if (isFinished) return;
         isFinished = true;
         console.log("[VoiceBot] Voice reply completed, reason:", reason);
+
+        if (globalSafetyTimeoutRef.current) {
+          clearTimeout(globalSafetyTimeoutRef.current);
+          globalSafetyTimeoutRef.current = null;
+        }
 
         if (ttsSafetyTimeoutRef.current) {
           clearTimeout(ttsSafetyTimeoutRef.current);
@@ -600,197 +602,257 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
         }
       };
 
-      const personaConfig = getVoiceConfig(currentPersona);
-
-      // Persona: system or device:* -> use local browser speech synthesis directly
-      if (personaConfig.serverVoice === "system" || currentPersona.startsWith("device:")) {
-        fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("system-synth-ended"));
-        return;
+      // Global safety timeout (around 15 seconds) that forcibly resets speaking flags and restarts listening if handleFinished never fires
+      if (globalSafetyTimeoutRef.current) {
+        clearTimeout(globalSafetyTimeoutRef.current);
+        globalSafetyTimeoutRef.current = null;
       }
-
-      let arrayBuffer: ArrayBuffer | null = null;
-      let contentType = "audio/mpeg";
-
-      // 1. Primary: Use preloaded audio from Gemini 3.8 Live if available
-      if (preloadedAudio) {
-        try {
-          if (preloadedAudio.startsWith("data:")) {
-            const parts = preloadedAudio.split(",");
-            const mimeMatch = parts[0].match(/:(.*?);/);
-            if (mimeMatch) contentType = mimeMatch[1];
-            const binary = atob(parts[1]);
-            const len = binary.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-              bytes[i] = binary.charCodeAt(i);
-            }
-            arrayBuffer = bytes.buffer;
-          } else {
-            const preRes = await fetch(preloadedAudio);
-            if (preRes.ok) {
-              contentType = preRes.headers.get("content-type") || "audio/wav";
-              arrayBuffer = await preRes.arrayBuffer();
+      globalSafetyTimeoutRef.current = setTimeout(() => {
+        if (!isFinished) {
+          console.warn("[VoiceBot] Global safety timeout fired: handleFinished never fired after 15s. Forcibly resetting speaking flags and restarting listening.");
+          isSpeakingRef.current = false;
+          isThinkingRef.current = false;
+          stopAllPlayback();
+          if (isMountedRef.current) {
+            updateStatus(isMicEnabledRef.current ? "listening" : "idle");
+            if (isMicEnabledRef.current) {
+              startListeningRef.current();
             }
           }
-        } catch (preloadErr) {
-          console.warn("[VoiceBot] Failed to decode preloaded Gemini audio:", preloadErr);
+          handleFinished("global-safety-timeout");
         }
-      }
+      }, 15000);
 
-      const serverVoice = personaConfig.serverVoice || "gemini-puck";
-
-      // 2. Fetch synthesized audio from server /api/tts if no preloaded audio was available
-      if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-        try {
-          const controller = new AbortController();
-          const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
-
-          const response = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text: cleanText,
-              voice: serverVoice,
-            }),
-            signal: controller.signal,
-          });
-          clearTimeout(ttsFetchTimeout);
-
-          if (response.ok) {
-            contentType = response.headers.get("content-type") || "audio/mpeg";
-            arrayBuffer = await response.arrayBuffer();
+      try {
+        // Pre-unlock AudioContext if needed
+        const ctx = await unlockAudioSystems();
+        if (ctx && ctx.state === "suspended") {
+          try {
+            await ctx.resume();
+          } catch (e) {
+            console.warn("[VoiceBot] ctx.resume:", e);
           }
-        } catch (postErr) {
-          console.warn("[VoiceBot] POST /api/tts failed, trying GET fallback:", postErr);
+        }
+        playJarvisChirp();
+
+        const personaConfig = getVoiceConfig(currentPersona);
+
+        // Persona: system or device:* -> use local browser speech synthesis directly
+        if (personaConfig.serverVoice === "system" || currentPersona.startsWith("device:")) {
+          playbackStarted = true;
+          fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("system-synth-ended"));
+          return;
         }
 
-        // Secondary fetch attempt via GET
+        let arrayBuffer: ArrayBuffer | null = null;
+        let contentType = "audio/mpeg";
+
+        // 1. Primary: Use preloaded audio from Gemini 3.8 Live if available
+        if (preloadedAudio) {
+          try {
+            if (preloadedAudio.startsWith("data:")) {
+              const parts = preloadedAudio.split(",");
+              const mimeMatch = parts[0].match(/:(.*?);/);
+              if (mimeMatch) contentType = mimeMatch[1];
+              const binary = atob(parts[1]);
+              const len = binary.length;
+              const bytes = new Uint8Array(len);
+              for (let i = 0; i < len; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+              arrayBuffer = bytes.buffer;
+            } else {
+              const preRes = await fetch(preloadedAudio);
+              if (preRes.ok) {
+                contentType = preRes.headers.get("content-type") || "audio/wav";
+                arrayBuffer = await preRes.arrayBuffer();
+              }
+            }
+          } catch (preloadErr) {
+            console.warn("[VoiceBot] Failed to decode preloaded Gemini audio:", preloadErr);
+          }
+        }
+
+        const serverVoice = personaConfig.serverVoice || "gemini-puck";
+
+        // 2. Fetch synthesized audio from server /api/tts if no preloaded audio was available
         if (!arrayBuffer || arrayBuffer.byteLength === 0) {
           try {
-            const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
-            if (getRes.ok) {
-              contentType = getRes.headers.get("content-type") || "audio/mpeg";
-              arrayBuffer = await getRes.arrayBuffer();
+            const controller = new AbortController();
+            const ttsFetchTimeout = setTimeout(() => controller.abort(), 12000);
+
+            const response = await fetch("/api/tts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                text: cleanText,
+                voice: serverVoice,
+              }),
+              signal: controller.signal,
+            });
+            clearTimeout(ttsFetchTimeout);
+
+            if (response.ok) {
+              contentType = response.headers.get("content-type") || "audio/mpeg";
+              arrayBuffer = await response.arrayBuffer();
             }
-          } catch (getErr) {
-            console.warn("[VoiceBot] GET /api/tts failed:", getErr);
+          } catch (postErr) {
+            console.warn("[VoiceBot] POST /api/tts failed, trying GET fallback:", postErr);
+          }
+
+          // Secondary fetch attempt via GET
+          if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+            try {
+              const getRes = await fetch(`/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(serverVoice)}`);
+              if (getRes.ok) {
+                contentType = getRes.headers.get("content-type") || "audio/mpeg";
+                arrayBuffer = await getRes.arrayBuffer();
+              }
+            } catch (getErr) {
+              console.warn("[VoiceBot] GET /api/tts failed:", getErr);
+            }
           }
         }
-      }
 
-      if (!isMountedRef.current) return;
+        if (!isMountedRef.current) return;
 
-      // Playback using downloaded audio
-      if (arrayBuffer && arrayBuffer.byteLength > 0) {
-        let activeCtx = audioContextRef.current || ctx;
-        if (activeCtx && activeCtx.state === "suspended") {
-          try {
-            await activeCtx.resume();
-          } catch {}
-        }
+        // Playback using downloaded audio
+        if (arrayBuffer && arrayBuffer.byteLength > 0) {
+          let activeCtx = audioContextRef.current || ctx;
+          if (activeCtx && activeCtx.state === "suspended") {
+            try {
+              await activeCtx.resume();
+            } catch {}
+          }
 
-        // Method A: Web Audio API with boosted audible gain and acoustic filter
-        if (activeCtx && activeCtx.state === "running") {
-          try {
-            const bufferCopy = arrayBuffer.slice(0);
-            const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
-            if (!isMountedRef.current) return;
+          // Method A: Web Audio API with boosted audible gain and acoustic filter
+          if (activeCtx && activeCtx.state === "running") {
+            try {
+              const bufferCopy = arrayBuffer.slice(0);
+              const audioBuffer = await activeCtx.decodeAudioData(bufferCopy);
+              if (!isMountedRef.current) return;
 
-            const source = activeCtx.createBufferSource();
-            source.buffer = audioBuffer;
+              const source = activeCtx.createBufferSource();
+              source.buffer = audioBuffer;
 
-            // Boost gain to 1.35x for crystal clear, audible output
-            const gainNode = activeCtx.createGain();
-            gainNode.gain.setValueAtTime(1.35, activeCtx.currentTime);
+              // Boost gain to 1.35x for crystal clear, audible output
+              const gainNode = activeCtx.createGain();
+              gainNode.gain.setValueAtTime(1.35, activeCtx.currentTime);
 
-            // Calculate effective playback rate from persona dsp rate * user rate
-            const baseRate = personaConfig.dsp?.playbackRate || 1.0;
-            const effectiveRate = Math.max(0.5, Math.min(2.0, baseRate * (voiceRateRef.current || 1.0)));
-            source.playbackRate.setValueAtTime(effectiveRate, activeCtx.currentTime);
+              // Calculate effective playback rate from persona dsp rate * user rate
+              const baseRate = personaConfig.dsp?.playbackRate || 1.0;
+              const effectiveRate = Math.max(0.5, Math.min(2.0, baseRate * (voiceRateRef.current || 1.0)));
+              source.playbackRate.setValueAtTime(effectiveRate, activeCtx.currentTime);
 
-            // Apply acoustic persona DSP filter if configured
-            if (personaConfig.dsp?.filterType) {
-              const filterNode = activeCtx.createBiquadFilter();
-              filterNode.type = personaConfig.dsp.filterType;
-              if (personaConfig.dsp.filterFreq) {
-                filterNode.frequency.setValueAtTime(personaConfig.dsp.filterFreq, activeCtx.currentTime);
+              // Apply acoustic persona DSP filter if configured
+              if (personaConfig.dsp?.filterType) {
+                const filterNode = activeCtx.createBiquadFilter();
+                filterNode.type = personaConfig.dsp.filterType;
+                if (personaConfig.dsp.filterFreq) {
+                  filterNode.frequency.setValueAtTime(personaConfig.dsp.filterFreq, activeCtx.currentTime);
+                }
+                if (personaConfig.dsp.filterGain !== undefined) {
+                  filterNode.gain.setValueAtTime(personaConfig.dsp.filterGain, activeCtx.currentTime);
+                }
+                if (personaConfig.dsp.filterQ !== undefined) {
+                  filterNode.Q.setValueAtTime(personaConfig.dsp.filterQ, activeCtx.currentTime);
+                }
+                source.connect(filterNode);
+                filterNode.connect(gainNode);
+              } else {
+                source.connect(gainNode);
               }
-              if (personaConfig.dsp.filterGain !== undefined) {
-                filterNode.gain.setValueAtTime(personaConfig.dsp.filterGain, activeCtx.currentTime);
-              }
-              if (personaConfig.dsp.filterQ !== undefined) {
-                filterNode.Q.setValueAtTime(personaConfig.dsp.filterQ, activeCtx.currentTime);
-              }
-              source.connect(filterNode);
-              filterNode.connect(gainNode);
-            } else {
-              source.connect(gainNode);
+
+              gainNode.connect(activeCtx.destination);
+              currentSourceNodeRef.current = source;
+
+              // Precision duration-based safety timer taking playback speed into account
+              const actualDurationMs = Math.ceil((audioBuffer.duration / effectiveRate) * 1000) + 1200;
+              ttsSafetyTimeoutRef.current = setTimeout(() => {
+                handleFinished("webaudio-timeout");
+              }, actualDurationMs);
+
+              source.onended = () => {
+                handleFinished("webaudio-ended");
+              };
+
+              playbackStarted = true;
+              source.start(0);
+              return;
+            } catch (webAudioErr) {
+              console.warn("[VoiceBot] Web Audio buffer decoding failed, trying HTML5 Audio:", webAudioErr);
             }
+          }
 
-            gainNode.connect(activeCtx.destination);
-            currentSourceNodeRef.current = source;
+          // Method B: Native HTML5 Audio playback via Blob URL
+          try {
+            const blob = new Blob([arrayBuffer], { type: contentType });
+            const audioUrl = URL.createObjectURL(blob);
+            const audio = persistentAudioRef.current || new Audio();
+            audioElementRef.current = audio;
+            audio.src = audioUrl;
+            audio.volume = 1.0;
 
-            // Precision duration-based safety timer taking playback speed into account
-            const actualDurationMs = Math.ceil((audioBuffer.duration / effectiveRate) * 1000) + 1200;
-            ttsSafetyTimeoutRef.current = setTimeout(() => {
-              handleFinished("webaudio-timeout");
-            }, actualDurationMs);
-
-            source.onended = () => {
-              handleFinished("webaudio-ended");
+            audio.onended = () => {
+              URL.revokeObjectURL(audioUrl);
+              handleFinished("html5-ended");
             };
 
-            source.start(0);
+            audio.onerror = (e) => {
+              console.warn("[VoiceBot] HTML5 audio error:", e);
+              URL.revokeObjectURL(audioUrl);
+              playbackStarted = true;
+              fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+            };
+
+            const playPromise = audio.play();
+            playbackStarted = true;
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  console.log("[VoiceBot] HTML5 audio playing successfully");
+                  const estMs = Math.max(6000, Math.ceil((cleanText.length / 5) * 1000) + 3000);
+                  ttsSafetyTimeoutRef.current = setTimeout(() => handleFinished("html5-timeout"), estMs);
+                })
+                .catch((playErr) => {
+                  console.warn("[VoiceBot] HTML5 audio play blocked, immediately falling back to speech synthesis:", playErr);
+                  URL.revokeObjectURL(audioUrl);
+                  playbackStarted = true;
+                  fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+                });
+            }
             return;
-          } catch (webAudioErr) {
-            console.warn("[VoiceBot] Web Audio buffer decoding failed, trying HTML5 Audio:", webAudioErr);
+          } catch (playErr) {
+            console.warn("[VoiceBot] HTML5 audio setup error, trying speech synthesis:", playErr);
+            playbackStarted = true;
+            fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+            return;
           }
         }
 
-        // Method B: Native HTML5 Audio playback via Blob URL
-        try {
-          const blob = new Blob([arrayBuffer], { type: contentType });
-          const audioUrl = URL.createObjectURL(blob);
-          const audio = persistentAudioRef.current || new Audio();
-          audioElementRef.current = audio;
-          audio.src = audioUrl;
-          audio.volume = 1.0;
-
-          audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            handleFinished("html5-ended");
-          };
-
-          audio.onerror = (e) => {
-            console.warn("[VoiceBot] HTML5 audio error:", e);
-            URL.revokeObjectURL(audioUrl);
-            fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
-          };
-
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise
-              .then(() => {
-                console.log("[VoiceBot] HTML5 audio playing successfully");
-                const estMs = Math.max(6000, Math.ceil((cleanText.length / 5) * 1000) + 3000);
-                ttsSafetyTimeoutRef.current = setTimeout(() => handleFinished("html5-timeout"), estMs);
-              })
-              .catch((playErr) => {
-                console.warn("[VoiceBot] HTML5 audio play blocked, immediately falling back to speech synthesis:", playErr);
-                URL.revokeObjectURL(audioUrl);
-                fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
-              });
+        // Method C: Browser SpeechSynthesis Fallback
+        playbackStarted = true;
+        fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
+      } catch (error) {
+        hasError = true;
+        console.error("[VoiceBot] Error in speakReply during TTS fetch, audio decoding, or playback setup:", error);
+        handleFinished("speak-reply-error");
+      } finally {
+        if (hasError || !playbackStarted) {
+          if (globalSafetyTimeoutRef.current) {
+            clearTimeout(globalSafetyTimeoutRef.current);
+            globalSafetyTimeoutRef.current = null;
           }
-          return;
-        } catch (playErr) {
-          console.warn("[VoiceBot] HTML5 audio setup error, trying speech synthesis:", playErr);
-          fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
-          return;
+          isSpeakingRef.current = false;
+          isThinkingRef.current = false;
+          if (isMountedRef.current) {
+            updateStatus(isMicEnabledRef.current ? "listening" : "idle");
+            if (isMicEnabledRef.current) {
+              startListeningRef.current();
+            }
+          }
         }
       }
-
-      // Method C: Browser SpeechSynthesis Fallback
-      fallbackSpeechSynthesis(cleanText, currentPersona, () => handleFinished("fallback-synth-ended"));
     },
     [fallbackSpeechSynthesis, playJarvisChirp, stopAllPlayback, stopListening, unlockAudioSystems, updateStatus]
   );
@@ -1708,6 +1770,9 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
       }
       if (ttsSafetyTimeoutRef.current) {
         clearTimeout(ttsSafetyTimeoutRef.current);
+      }
+      if (globalSafetyTimeoutRef.current) {
+        clearTimeout(globalSafetyTimeoutRef.current);
       }
       if (dialogueTimerRef.current) {
         clearTimeout(dialogueTimerRef.current);
