@@ -1696,6 +1696,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     recognitionRef.current = recognition;
 
     recognition.onstart = () => {
+      console.log("[SR] started");
       isRecognitionActiveRef.current = true;
       consecutiveNetworkErrorsRef.current = 0;
       if (!isSpeakingRef.current && !isThinkingRef.current && isMountedRef.current) {
@@ -1705,6 +1706,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
 
     // Fired immediately when speech begins
     recognition.onspeechstart = () => {
+      console.log("[SR] speech detected");
       if (!isMountedRef.current) return;
       // Ignore room acoustics and speaker output while assistant is speaking or thinking
       if (isSpeakingRef.current || isThinkingRef.current) {
@@ -1752,6 +1754,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     };
 
     recognition.onresult = (event: SpeechRecognitionEventItem) => {
+      console.log("[SR] result:", event.results);
       if (!isMountedRef.current || isThinkingRef.current || isSpeakingRef.current) {
         return;
       }
@@ -1806,6 +1809,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEventItem) => {
+      console.log("[SR] error:", event.error);
       if (!isMountedRef.current) return;
       if (event.error === "no-speech" || event.error === "aborted") {
         return;
@@ -1844,6 +1848,7 @@ export default function VoiceBot({ onAgentStateChange }: VoiceBotProps) {
     };
 
     recognition.onend = () => {
+      console.log("[SR] ended");
       isRecognitionActiveRef.current = false;
       if (!isMountedRef.current) return;
 
